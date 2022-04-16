@@ -121,63 +121,66 @@ namespace spp {
 
 
 
-	template <typename T>
+	template <typename T, u32 BLOCK_THREADS, u32 THREAD_ITEMS>
 	__global__
 	void global_inclusive_scan(u32 length, T const * values, T * results) {
+
+		constexpr u32 BLOCK_ITEMS	= BLOCK_THREADS * THREAD_ITEMS;
 
 		cg::grid_group grid			= cg::this_grid();
 		cg::thread_block block		= cg::this_thread_block();
 
-		u32 const block_length		= block.num_threads();
-		u32 const thread_rank		= block.thread_rank();
-
 		u32 const block_rank_begin	= grid.block_rank();
 		u32 const block_rank_step	= grid.num_blocks();
-		u32 const block_rank_end	= (length + block_length - 1) / block_length;
-		
+		u32 const block_rank_end	= (length + BLOCK_ITEMS - 1) / BLOCK_ITEMS;
+
+		u32 const thread_rank		= block.thread_rank();
+
 		if (block_rank_begin == 0 and thread_rank == 0) {
 			*reinterpret_cast<T * *>(results) = static_cast<T *>(malloc(sizeof(T) * block_rank_end));
 		}
 
 		grid.sync();
 		
-		T * block_partial_results = *reinterpret_cast<T * *>(results);
+		T * block_aggregates = *reinterpret_cast<T * *>(results);
 
 		for (u32 block_rank = block_rank_begin; block_rank < block_rank_end; block_rank += block_rank_step) {
-			u32 const value_rank = block_rank * block_length + thread_rank;
+			u32 const item_rank_begin = block_rank * BLOCK_ITEMS + thread_rank * THREAD_ITEMS;
 
-			bool const is_active = value_rank < length;
-			T const value = is_active ? values[value_rank] : identity<T>();
-			T const block_reduction = reduce(block, is_active, value);
+			bool const is_active = item_rank_begin < length;
+			T thread_item = identity<T>();
+			for (u32 i = 0; i < THREAD_ITEMS; ++i) {
+				const u32 item_rank = item_rank_begin + i;
+				if (not (item_rank < length)) break;
+				thread_item += values[item_rank];
+			}
+			T const block_reduction = reduce(block, is_active, thread_item);
 
-			if (thread_rank == 0) block_partial_results[block_rank] = block_reduction;
+			if (thread_rank == 0) block_aggregates[block_rank] = block_reduction;
 		}
 
 		grid.sync();
 
 		if (grid.block_rank() == 0) {
-			u32 const br_step	= block.num_threads();
-			u32 const br_end	= (block_rank_end + br_step - 1) / br_step;
-
 			T global_prefix = identity<T>();
 			
-			for (u32 br_i = 0; br_i < br_end; ++br_i) {
-				u32 value_rank = br_i * br_step + thread_rank;
-				bool const is_active = value_rank < block_rank_end;
+			for (u32 i = 0; i < (block_rank_end + BLOCK_THREADS - 1) / BLOCK_THREADS; ++i) {
+				u32 agg_rank = i * BLOCK_THREADS + thread_rank;
+				bool const is_active = agg_rank < block_rank_end;
 
-				T const block_reduction = is_active ? block_partial_results[value_rank] : identity<T>();
-				T const local_prefix = exclusive_scan(block, is_active, block_reduction);
+				T const aggregate = is_active ? block_aggregates[agg_rank] : identity<T>();
+				T const local_prefix = exclusive_scan(block, is_active, aggregate);
 				if (is_active)
-					block_partial_results[value_rank] = global_prefix + local_prefix;
+					block_aggregates[agg_rank] = global_prefix + local_prefix;
 				
-				__shared__ T cluster_reduction;
+				__shared__ T aggregate_reduction;
 
 				if (block.thread_rank() == block.num_threads() - 1)
-					cluster_reduction = local_prefix + block_reduction;
+					aggregate_reduction = local_prefix + aggregate;
 				
 				block.sync();
 				
-				global_prefix += cluster_reduction;
+				global_prefix += aggregate_reduction;
 				
 				block.sync();
 			}
@@ -186,20 +189,32 @@ namespace spp {
 		grid.sync();
 
 		for (u32 block_rank = block_rank_begin; block_rank < block_rank_end; block_rank += block_rank_step) {
-			u32 const value_rank = block_rank * block_length + thread_rank;
+			u32 const item_rank_begin = block_rank * BLOCK_ITEMS + thread_rank * THREAD_ITEMS;
 
-			bool const is_active = value_rank < length;
-			T const value = is_active ? values[value_rank] : identity<T>();
-			T const thread_partial_result = inclusive_scan(block, is_active, value);
+			bool const is_active = item_rank_begin < length;
+			
+			T thread_items[THREAD_ITEMS] = {};
+
+			for (u32 i = 0; i < THREAD_ITEMS; ++i) {
+				u32 const item_rank = item_rank_begin + i;
+				if (not (item_rank < length)) break;
+				T const item = values[item_rank];
+				for (u32 j = i; j < THREAD_ITEMS; ++j) thread_items[j] += item;
+			}
+
+			T const thread_partial_result = exclusive_scan(block, is_active, thread_items[THREAD_ITEMS - 1]);
 		
-			if (is_active)
-				results[value_rank] = block_partial_results[block_rank] + thread_partial_result;
+			for (u32 i = 0; i < THREAD_ITEMS; ++i) {
+				u32 const item_rank = item_rank_begin + i;
+				if (not (item_rank < length)) break;
+				results[item_rank] = block_aggregates[block_rank] + thread_partial_result + thread_items[i];
+			}
 		}
 
 		grid.sync();
 
 		if (block_rank_begin == 0 and thread_rank == 0)
-			free(block_partial_results);
+			free(block_aggregates);
 		
 	} // inclusive_scan
 
@@ -207,14 +222,19 @@ namespace spp {
 
 	template <typename T>
 	cudaError_t inclusive_scan(u32 length, T const * values, T * results) {
-		void * fn = (void *)global_inclusive_scan<T>;
+		constexpr u32 threads_per_block = 128;
+		constexpr u32 items_per_thread = 4;
+
+		void * fn = (void *)global_inclusive_scan<T, threads_per_block, items_per_thread>;
 
 		cudaDeviceProp device_prop;
 		cudaGetDeviceProperties(&device_prop, 0);
 
-		i32 const threads_per_block = 128;
 		i32 blocks_per_sm = 0;
 		cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks_per_sm, fn, threads_per_block, 0);
+
+		// printf("Number of Processor: %d\n", device_prop.multiProcessorCount);
+		// printf("Blocks per Processor: %d\n", blocks_per_sm);
 
 		dim3 const grid_dim(blocks_per_sm * device_prop.multiProcessorCount, 1, 1);
 		dim3 const block_dim(threads_per_block, 1, 1);
