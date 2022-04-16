@@ -220,12 +220,144 @@ namespace spp {
 
 
 
+	__host__ __device__
+	constexpr u32 ceiled_div(u32 dividend, u32 divisor) {
+		return (dividend + divisor - 1) / divisor;
+	}
+
+	enum struct partition_status : u32 {
+		invalid = 0, aggregated = 1, prefixed = 2
+	};
+
+	template <typename T>
+	struct partition_descriptor {
+		partition_status status;
+		T aggregate;
+		T inclusive_prefix;
+	};
+
+	__device__
+	void block_memset(cg::thread_block const & block, void volatile * dest, u32 bytes, u8 value) {
+		for (u32 i = block.thread_rank(); i < bytes; i += block.num_threads()) {
+			reinterpret_cast<u8 volatile *>(dest)[i] = value;
+		}
+	}
+
+	template <typename T, u32 THREADS_PER_BLOCK, u32 VALUES_PER_THREAD>
+	__global__
+	void kernel_inclusive_scan_look_back(u32 length, T const * values, T * results) {
+
+		constexpr u32 VALUES_PER_BLOCK = VALUES_PER_THREAD * THREADS_PER_BLOCK;
+
+		cg::grid_group grid			= cg::this_grid();
+		cg::thread_block block		= cg::this_thread_block();
+
+		u32 const block_rank_begin	= grid.block_rank();
+		u32 const block_rank_step	= grid.num_blocks();
+		u32 const block_rank_count	= ceiled_div(length, VALUES_PER_BLOCK);
+
+		u32 const thread_rank		= block.thread_rank();
+		u32 const num_threads		= block.num_threads();
+
+
+
+		using part_desc = partition_descriptor<T>;
+
+		if (block_rank_begin == 0) {
+			u32 const desc_size_in_bytes = sizeof(part_desc) * block_rank_count;
+
+			if (thread_rank == 0)
+				*reinterpret_cast<part_desc * volatile *>(results) = static_cast<part_desc *>(malloc(desc_size_in_bytes));
+
+			block.sync();
+			
+			block_memset(block, *reinterpret_cast<part_desc * *>(results), desc_size_in_bytes, u8(0));
+			
+			block.sync();
+		}
+
+		grid.sync();
+
+		part_desc volatile * part_descs = *reinterpret_cast<part_desc * volatile *>(results);
+
+
+
+		for (u32 block_rank = block_rank_begin; block_rank < block_rank_count; block_rank += block_rank_step) {
+			
+			u32 const value_rank_begin = block_rank * VALUES_PER_BLOCK + thread_rank * VALUES_PER_THREAD;
+
+			bool const is_active = value_rank_begin < length;
+
+			T thread_reduction = identity<T>();
+			T thread_tile[VALUES_PER_THREAD];
+			
+			for (u32 i = 0; i < VALUES_PER_THREAD; ++i) {
+				u32 const value_rank = value_rank_begin + i;
+				if (not (value_rank < length)) break;
+				
+				T const value = values[value_rank];
+				
+				thread_reduction += value;
+				thread_tile[i] = thread_reduction;
+			}
+
+			T const thread_prefix_in_partition = exclusive_scan(block, is_active, thread_reduction);
+
+			bool const is_last = thread_rank + 1 == num_threads;
+
+			__shared__ T s_block_exclusive_prefix;
+
+			if (is_last) {
+				part_descs[block_rank].aggregate = thread_prefix_in_partition + thread_reduction;
+				__threadfence();
+				part_descs[block_rank].status = partition_status::aggregated;
+
+				T block_exclusive_prefix = identity<T>();
+
+				for (i32 i = block_rank - 1; 0 <= i; --i) {
+					partition_status status;
+					do status = part_descs[i].status; while (partition_status::invalid == status);
+					if (partition_status::prefixed == status) {
+						block_exclusive_prefix += part_descs[i].inclusive_prefix;
+						break;
+					} else {
+						block_exclusive_prefix += part_descs[i].aggregate;
+					}
+				}
+
+				s_block_exclusive_prefix = block_exclusive_prefix;
+			}
+
+			block.sync();
+
+			T const block_exclusive_prefix = s_block_exclusive_prefix;
+			// [todo] it seems that there is no need to synchronize?
+
+			if (is_last) {
+				part_descs[block_rank].inclusive_prefix = block_exclusive_prefix + thread_prefix_in_partition + thread_reduction;
+				__threadfence();
+				part_descs[block_rank].status = partition_status::prefixed;
+			}
+
+			for (u32 i = 0; i < VALUES_PER_THREAD; ++i) {
+				u32 const value_rank = value_rank_begin + i;
+				if (not (value_rank < length)) break;
+				
+				results[value_rank] = block_exclusive_prefix + thread_prefix_in_partition + thread_tile[i];
+			}
+			
+		}
+
+	}
+
+
+
 	template <typename T>
 	cudaError_t inclusive_scan(u32 length, T const * values, T * results) {
 		constexpr u32 threads_per_block = 128;
 		constexpr u32 items_per_thread = 4;
 
-		void * fn = (void *)global_inclusive_scan<T, threads_per_block, items_per_thread>;
+		void * fn = (void *)kernel_inclusive_scan_look_back<T, threads_per_block, items_per_thread>;
 
 		cudaDeviceProp device_prop;
 		cudaGetDeviceProperties(&device_prop, 0);
