@@ -11,117 +11,69 @@
 
 namespace spp {
 
-	namespace cg = cooperative_groups;
-
-	// template <typename T>
-	// constexpr bool is_shuffable_v = std::is_trivially_copyable_v<T> and sizeof(T) <= 32;
-
-	// constexpr bool is_power_of_two(u32 v) {
-	// 	return v and (v & (v - 1)) == 0;
-	// }
-
-	// template <u32 Size, typename ParentType, typename = std::enable_if_t<is_power_of_two(Size) and Size <= 32>>
-	// class block_tile {
-
-	// 	cg::thread_block_tile<Size, ParentType> native;
-
-	// public:
-
-	// 	block_tile() = default;
-	// 	~block_tile() = default;
-
-	// 	block_tile(block_tile const &) = default;
-	// 	block_tile & operator=(block_tile const &) = default;
-
-	// 	block_tile(block_tile &&) = default;
-	// 	block_tile & operator=(block_tile &&) = default;
-
-	// 	template <typename T, typename = std::enable_if_t<is_shuffable_v<T>>>
-	// 	T shuffle(T const & var, u32 src_rank) {
-	// 		return native.shfl(var, src_rank);
-	// 	}
-
-	// };
+	namespace cg = ::cooperative_groups;
 
 
-
-	using block_group		= cg::thread_block;
-	using grid_group		= cg::grid_group;
-	using warp_group		= cg::thread_block_tile<32>;
-	using coalesced_group	= cg::coalesced_group;
-
-	using cg::coalesced_threads;
-
-	using cg::reduce;
-	using cg::inclusive_scan;
-
-	__device__
-	warp_group warp_from(block_group const & block) {
-		return cg::tiled_partition<32>(block);
-	}
-
-	namespace op {
-		using cg::plus;
-	}
 
 	template <typename T>
 	__host__ __device__
 	T identity() { return T(0); }
 
-
-
 	template <typename T, u32 S, u32 ID = 0>
 	__device__
-	T * static_shared() {
+	T * unsafe_shared() {
 		__shared__ T buffer[S];
 		return buffer;
 	}
 
 
 
-	template <typename T>
+	template <typename T, bool Sync = true>
 	__device__
-	T reduce(block_group const & block, bool is_active, T const & value) {
-		warp_group warp		= warp_from(block);
-		u32 const warp_rank	= warp.meta_group_rank();
-		u32 const num_warps	= warp.meta_group_size();
+	T reduce(cg::thread_block const & block, bool is_active, T const & value) {
+		
+		cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
 
-		u32 const thread_rank = warp.thread_rank();
+		u32 const warp_rank		= warp.meta_group_rank();
+		u32 const num_warps		= warp.meta_group_size();
+		u32 const thread_rank	= warp.thread_rank();
 
-		__shared__ bool is_warp_active[32];
-		__shared__ T buffer[32];
+		bool * is_warp_active	= unsafe_shared<bool, 32>();
+		T * buffer				= unsafe_shared<T, 32>();
 
 		bool const is_any_thread_active = warp.any(is_active);
 		if (thread_rank == 0) is_warp_active[warp_rank] = is_any_thread_active;
 
 		if (is_active) {
-			coalesced_group active = coalesced_threads();
-			T const partial_result = reduce(active, value, op::plus<T>());
+			cg::coalesced_group active = cg::coalesced_threads();
+			T const partial_result = reduce(active, value, cg::plus<T>());
 			if (thread_rank == 0) buffer[warp_rank] = partial_result;
 		}
 
 		block.sync();
 			
 		if (warp_rank == 0 and thread_rank < num_warps and is_warp_active[thread_rank]) {
-			coalesced_group active = coalesced_threads();
-			buffer[thread_rank] = reduce(active, buffer[thread_rank], op::plus<T>());
+			cg::coalesced_group active = cg::coalesced_threads();
+			buffer[thread_rank] = reduce(active, buffer[thread_rank], cg::plus<T>());
 		}
 
 		block.sync();
 
 		T const final_result = buffer[warp_rank];
 
-		block.sync();
+		if constexpr (Sync) block.sync();
 
 		return final_result;
+
 	}
 
 
 
-	template <typename T>
+	template <typename T, bool Sync = true>
 	__device__
-	T inclusive_scan(block_group const & block, bool is_active, T const & value) {
-		warp_group warp = warp_from(block);
+	T inclusive_scan(cg::thread_block const & block, bool is_active, T const & value) {
+		
+		cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
 
 		u32 const warp_rank = warp.meta_group_rank();
 		u32 const num_warps = warp.meta_group_size();
@@ -129,8 +81,8 @@ namespace spp {
 		u32 const thread_rank = warp.thread_rank();
 		u32 const num_threads = warp.num_threads();
 
-		__shared__ bool is_warp_active[32];
-		__shared__ T buffer[32];
+		bool * is_warp_active = unsafe_shared<bool, 32>();
+		T * buffer = unsafe_shared<T, 32>();
 
 		bool const is_any_thread_active = warp.any(is_active);
 		if (thread_rank == 0) is_warp_active[warp_rank] = is_any_thread_active;
@@ -138,33 +90,33 @@ namespace spp {
 		T thread_partial_result;
 
 		if (is_active) {
-			coalesced_group active = coalesced_threads();
-			thread_partial_result = inclusive_scan(active, value, op::plus<T>());
+			cg::coalesced_group active = cg::coalesced_threads();
+			thread_partial_result = inclusive_scan(active, value, cg::plus<T>());
 			if (thread_rank == num_threads - 1) buffer[warp_rank] = thread_partial_result;
 		}
 
 		block.sync();
 
 		if (warp_rank == 0 and thread_rank < num_warps and is_warp_active[thread_rank]) {
-			coalesced_group active = coalesced_threads();
-			buffer[thread_rank] = exclusive_scan(active, buffer[thread_rank], op::plus<T>());
+			cg::coalesced_group active = cg::coalesced_threads();
+			buffer[thread_rank] = exclusive_scan(active, buffer[thread_rank], cg::plus<T>());
 		}
 
 		block.sync();
 
 		T const final_result = buffer[warp_rank] + thread_partial_result;
 		
-		block.sync();
+		if constexpr (Sync) block.sync();
 		
 		return final_result;
 	}
 
 
 
-	template <typename T>
+	template <typename T, bool Sync = true>
 	__device__
 	T exclusive_scan(cg::thread_block const & block, bool is_active, T const & value) {
-		return inclusive_scan(block, is_active, value) - value;
+		return inclusive_scan<T, Sync>(block, is_active, value) - value;
 	}
 
 
@@ -174,18 +126,17 @@ namespace spp {
 	void global_inclusive_scan(u32 length, T const * values, T * results) {
 
 		cg::grid_group grid			= cg::this_grid();
-
 		cg::thread_block block		= cg::this_thread_block();
+
 		u32 const block_length		= block.num_threads();
+		u32 const thread_rank		= block.thread_rank();
 
 		u32 const block_rank_begin	= grid.block_rank();
 		u32 const block_rank_step	= grid.num_blocks();
 		u32 const block_rank_end	= (length + block_length - 1) / block_length;
-
-		u32 const thread_rank		= block.thread_rank();
 		
 		if (block_rank_begin == 0 and thread_rank == 0) {
-			*reinterpret_cast<T * *>(results) = static_cast<T *>(malloc(sizeof(T) * grid.num_blocks()));
+			*reinterpret_cast<T * *>(results) = static_cast<T *>(malloc(sizeof(T) * block_rank_end));
 		}
 
 		grid.sync();
@@ -205,19 +156,19 @@ namespace spp {
 		grid.sync();
 
 		if (grid.block_rank() == 0) {
-			u32 const br_begin	= 0;
 			u32 const br_step	= block.num_threads();
-			u32 const br_end	= (grid.num_blocks() + br_step - 1) / br_step;
+			u32 const br_end	= (block_rank_end + br_step - 1) / br_step;
 
 			T global_prefix = identity<T>();
 			
-			for (u32 br_rank = br_begin; br_rank < br_end; br_rank += br_step) {
-				u32 value_rank = br_rank + thread_rank;
-				bool const is_active = value_rank < grid.num_blocks();
-				T const block_reduction = is_active ? block_partial_results[value_rank] : identity<T>();
+			for (u32 br_i = 0; br_i < br_end; ++br_i) {
+				u32 value_rank = br_i * br_step + thread_rank;
+				bool const is_active = value_rank < block_rank_end;
 
+				T const block_reduction = is_active ? block_partial_results[value_rank] : identity<T>();
 				T const local_prefix = exclusive_scan(block, is_active, block_reduction);
-				block_partial_results[value_rank] = global_prefix + local_prefix;
+				if (is_active)
+					block_partial_results[value_rank] = global_prefix + local_prefix;
 				
 				__shared__ T cluster_reduction;
 
@@ -261,12 +212,12 @@ namespace spp {
 		cudaDeviceProp device_prop;
 		cudaGetDeviceProperties(&device_prop, 0);
 
-		i32 const num_threads = 1024;
-		i32 num_blocks = 0;
-		cudaOccupancyMaxActiveBlocksPerMultiprocessor(&num_blocks, fn, num_threads, 0);
+		i32 const threads_per_block = 128;
+		i32 blocks_per_sm = 0;
+		cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks_per_sm, fn, threads_per_block, 0);
 
-		dim3 const grid_dim(num_blocks, 1, 1);
-		dim3 const block_dim(num_threads, 1, 1);
+		dim3 const grid_dim(blocks_per_sm * device_prop.multiProcessorCount, 1, 1);
+		dim3 const block_dim(threads_per_block, 1, 1);
 		void * args[] = { &length, &values, &results };
 		return cudaLaunchCooperativeKernel(fn, grid_dim, block_dim, args);
 	}

@@ -23,7 +23,7 @@ int main(void) {
 	using index_dist_t = std::uniform_int_distribution<u32>;
 	using data_dist_t = std::uniform_int_distribution<data_t>;
 
-	constexpr u32 seg_count = 128;
+	constexpr u32 seg_count = 1024 * 32;
 
 	std::mt19937 gen(std::random_device{}());
 
@@ -64,8 +64,8 @@ int main(void) {
 	
 	auto d_in_data = spp::device_alloc<data_t>(h_data.data(), h_data.data() + total_length);
 
-	auto d_out_data_truth = spp::device_alloc<data_t>(h_data.size());
-	auto d_out_data_test = spp::device_alloc<data_t>(h_data.size());
+	auto d_out_data_truth = spp::device_alloc<data_t>(total_length);
+	auto d_out_data_test = spp::device_alloc<data_t>(total_length);
 
 
 
@@ -95,20 +95,30 @@ int main(void) {
 
 
 
-	// std::vector<u32> h_out_keys(seg_count);
-	// cudaMemcpy(h_out_keys.data(), d_out_keys.get(), sizeof(u32) * seg_count, cudaMemcpyDeviceToHost);
-	// std::copy(h_out_keys.begin(), h_out_keys.end(), std::ostream_iterator<u32>(std::cout, " "));
+	std::vector<data_t> h_out_data_truth(total_length);
+	cudaMemcpy(h_out_data_truth.data(), d_out_data_truth.get(), sizeof(data_t) * total_length, cudaMemcpyDeviceToHost);
+
+	std::vector<data_t> h_out_data_test(total_length);
+	cudaMemcpy(h_out_data_test.data(), d_out_data_test.get(), sizeof(data_t) * total_length, cudaMemcpyDeviceToHost);
+
+	// std::copy(h_out_data_truth.begin(), h_out_data_truth.end(), std::ostream_iterator<data_t>(std::cout, " "));
+	// std::cout << std::endl;
+	// std::copy(h_out_data_test.begin(), h_out_data_test.end(), std::ostream_iterator<data_t>(std::cout, " "));
 	// std::cout << std::endl;
 
-	std::vector<data_t> h_out_data_truth(seg_count);
-	cudaMemcpy(h_out_data_truth.data(), d_out_data_truth.get(), sizeof(data_t) * seg_count, cudaMemcpyDeviceToHost);
-	std::copy(h_out_data_truth.begin(), h_out_data_truth.end(), std::ostream_iterator<data_t>(std::cout, " "));
-	std::cout << std::endl;
+	u32 error_count = 0;
 
-	std::vector<data_t> h_out_data_test(seg_count);
-	cudaMemcpy(h_out_data_test.data(), d_out_data_test.get(), sizeof(data_t) * seg_count, cudaMemcpyDeviceToHost);
-	std::copy(h_out_data_test.begin(), h_out_data_test.end(), std::ostream_iterator<data_t>(std::cout, " "));
-	std::cout << std::endl;
+	for (u32 i = 0; i < total_length; ++i) {
+		data_t const truth = h_out_data_truth[i];
+		data_t const test = h_out_data_test[i];
+		if (truth != test) {
+			if (error_count == 0) std::cout << "element " << i << ": ground truth = " << truth << ", test = " << test << std::endl;
+			++error_count;
+		}
+	}
+
+	std::cout << "total length = " << total_length << std::endl;
+	std::cout << "error count = " << error_count << std::endl;
 
 
 
