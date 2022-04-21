@@ -17,7 +17,7 @@ namespace spp {
 
 	template <typename T>
 	__host__ __device__
-	T identity() { return T(0); }
+	constexpr T identity() { return T(0); }
 
 	template <typename T, u32 S, u32 ID = 0>
 	__device__
@@ -121,18 +121,25 @@ namespace spp {
 
 
 
-	template <typename T, u32 BLOCK_THREADS, u32 THREAD_ITEMS>
+	#define ptx_barrier_arrive(id, count) asm volatile ("barrier.arrive %0, %1;" : : "n"(id), "n"(count))
+	#define ptx_barrier_sync(id, count) asm volatile ("barrier.sync %0, %1;" : : "n"(id), "n"(count))
+
+
+
+	template <typename T, u32 THREADS_PER_BLOCK, u32 VALUES_PER_THREAD>
 	__global__
 	void global_inclusive_scan(u32 length, T const * values, T * results) {
 
-		constexpr u32 BLOCK_ITEMS	= BLOCK_THREADS * THREAD_ITEMS;
+		constexpr u32 VALUES_PER_BLOCK	= THREADS_PER_BLOCK * VALUES_PER_THREAD;
+		// constexpr u32 WARPS_PER_BLOCK	= THREADS_PER_BLOCK / 32;
 
-		cg::grid_group grid			= cg::this_grid();
-		cg::thread_block block		= cg::this_thread_block();
+		cg::grid_group grid				= cg::this_grid();
+		cg::thread_block block			= cg::this_thread_block();
+		// cg::thread_block_tile<32> warp	= cg::tiled_partition<32>(block);
 
 		u32 const block_rank_begin	= grid.block_rank();
 		u32 const block_rank_step	= grid.num_blocks();
-		u32 const block_rank_end	= (length + BLOCK_ITEMS - 1) / BLOCK_ITEMS;
+		u32 const block_rank_end	= (length + VALUES_PER_BLOCK - 1) / VALUES_PER_BLOCK;
 
 		u32 const thread_rank		= block.thread_rank();
 
@@ -145,11 +152,11 @@ namespace spp {
 		T * block_aggregates = *reinterpret_cast<T * *>(results);
 
 		for (u32 block_rank = block_rank_begin; block_rank < block_rank_end; block_rank += block_rank_step) {
-			u32 const item_rank_begin = block_rank * BLOCK_ITEMS + thread_rank * THREAD_ITEMS;
+			u32 const item_rank_begin = block_rank * VALUES_PER_BLOCK + thread_rank * VALUES_PER_THREAD;
 
 			bool const is_active = item_rank_begin < length;
 			T thread_item = identity<T>();
-			for (u32 i = 0; i < THREAD_ITEMS; ++i) {
+			for (u32 i = 0; i < VALUES_PER_THREAD; ++i) {
 				const u32 item_rank = item_rank_begin + i;
 				if (not (item_rank < length)) break;
 				thread_item += values[item_rank];
@@ -164,8 +171,8 @@ namespace spp {
 		if (grid.block_rank() == 0) {
 			T global_prefix = identity<T>();
 			
-			for (u32 i = 0; i < (block_rank_end + BLOCK_THREADS - 1) / BLOCK_THREADS; ++i) {
-				u32 agg_rank = i * BLOCK_THREADS + thread_rank;
+			for (u32 i = 0; i < (block_rank_end + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK; ++i) {
+				u32 agg_rank = i * THREADS_PER_BLOCK + thread_rank;
 				bool const is_active = agg_rank < block_rank_end;
 
 				T const aggregate = is_active ? block_aggregates[agg_rank] : identity<T>();
@@ -189,22 +196,22 @@ namespace spp {
 		grid.sync();
 
 		for (u32 block_rank = block_rank_begin; block_rank < block_rank_end; block_rank += block_rank_step) {
-			u32 const item_rank_begin = block_rank * BLOCK_ITEMS + thread_rank * THREAD_ITEMS;
+			u32 const item_rank_begin = block_rank * VALUES_PER_BLOCK + thread_rank * VALUES_PER_THREAD;
 
 			bool const is_active = item_rank_begin < length;
 			
-			T thread_items[THREAD_ITEMS] = {};
+			T thread_items[VALUES_PER_THREAD] = {};
 
-			for (u32 i = 0; i < THREAD_ITEMS; ++i) {
+			for (u32 i = 0; i < VALUES_PER_THREAD; ++i) {
 				u32 const item_rank = item_rank_begin + i;
 				if (not (item_rank < length)) break;
 				T const item = values[item_rank];
-				for (u32 j = i; j < THREAD_ITEMS; ++j) thread_items[j] += item;
+				for (u32 j = i; j < VALUES_PER_THREAD; ++j) thread_items[j] += item;
 			}
 
-			T const thread_partial_result = exclusive_scan(block, is_active, thread_items[THREAD_ITEMS - 1]);
+			T const thread_partial_result = exclusive_scan(block, is_active, thread_items[VALUES_PER_THREAD - 1]);
 		
-			for (u32 i = 0; i < THREAD_ITEMS; ++i) {
+			for (u32 i = 0; i < VALUES_PER_THREAD; ++i) {
 				u32 const item_rank = item_rank_begin + i;
 				if (not (item_rank < length)) break;
 				results[item_rank] = block_aggregates[block_rank] + thread_partial_result + thread_items[i];
@@ -225,13 +232,20 @@ namespace spp {
 		return (dividend + divisor - 1) / divisor;
 	}
 
-	enum struct partition_status : u32 {
+	template <typename T>
+	struct warp_descriptor {
+		u32 status;
+		T aggregate;
+		T inclusive_prefix;
+	};
+
+	enum struct block_status : u32 {
 		invalid = 0, aggregated = 1, prefixed = 2
 	};
 
 	template <typename T>
-	struct partition_descriptor {
-		partition_status status;
+	struct block_descriptor {
+		block_status status;
 		T aggregate;
 		T inclusive_prefix;
 	};
@@ -247,106 +261,168 @@ namespace spp {
 	__global__
 	void kernel_inclusive_scan_look_back(u32 length, T const * values, T * results) {
 
-		constexpr u32 VALUES_PER_BLOCK = VALUES_PER_THREAD * THREADS_PER_BLOCK;
-
-		cg::grid_group grid			= cg::this_grid();
-		cg::thread_block block		= cg::this_thread_block();
-
-		u32 const block_rank_begin	= grid.block_rank();
-		u32 const block_rank_step	= grid.num_blocks();
-		u32 const block_rank_count	= ceiled_div(length, VALUES_PER_BLOCK);
-
-		u32 const thread_rank		= block.thread_rank();
-		u32 const num_threads		= block.num_threads();
+		constexpr u32 VALUES_PER_BLOCK	= VALUES_PER_THREAD * THREADS_PER_BLOCK;
+		constexpr u32 WARPS_PER_BLOCK	= THREADS_PER_BLOCK / 32;
+		
+		cg::grid_group grid				= cg::this_grid();
+		cg::thread_block block			= cg::this_thread_block();
+		cg::thread_block_tile<32> warp	= cg::tiled_partition<32>(block);
 
 
 
-		using part_desc = partition_descriptor<T>;
+		__shared__ volatile warp_descriptor<T> warp_desc[WARPS_PER_BLOCK];
 
-		if (block_rank_begin == 0) {
-			u32 const desc_size_in_bytes = sizeof(part_desc) * block_rank_count;
+		if (warp.thread_rank() == 0) {
+			warp_desc[warp.meta_group_rank()].status = static_cast<u32>(grid.block_rank());
+		}
 
-			if (thread_rank == 0)
-				*reinterpret_cast<part_desc * volatile *>(results) = static_cast<part_desc *>(malloc(desc_size_in_bytes));
+		block_descriptor<T> volatile * block_desc;
 
-			block.sync();
+		if (grid.block_rank() == 0) {
+			u32 const size_in_bytes = sizeof(block_descriptor<T>) * grid.num_blocks();
+
+			__shared__ block_descriptor<T> volatile * s_block_desc;
+
+			if (block.thread_rank() == 0) {
+				block_desc = static_cast<block_descriptor<T> *>(malloc(size_in_bytes));
+				s_block_desc = block_desc;
+			}
 			
-			block_memset(block, *reinterpret_cast<part_desc * *>(results), desc_size_in_bytes, u8(0));
-			
 			block.sync();
+
+			if (block.thread_rank() == 0) {
+				*reinterpret_cast<block_descriptor<T> volatile * *>(results) = block_desc;
+			} else {
+				block_desc = s_block_desc;
+			}
+
+			block_memset(block, block_desc, size_in_bytes, u8(0));
 		}
 
 		grid.sync();
 
-		part_desc volatile * part_descs = *reinterpret_cast<part_desc * volatile *>(results);
+		if (grid.block_rank() != 0) {
+			block_desc = *reinterpret_cast<block_descriptor<T> * *>(results);
+		}
 
 
+
+		u32 const block_rank_begin		= grid.block_rank();
+		u32 const block_rank_step		= grid.num_blocks();
+		u32 const block_rank_count		= ceiled_div(length, VALUES_PER_BLOCK);
 
 		for (u32 block_rank = block_rank_begin; block_rank < block_rank_count; block_rank += block_rank_step) {
 			
-			u32 const value_rank_begin = block_rank * VALUES_PER_BLOCK + thread_rank * VALUES_PER_THREAD;
-
-			bool const is_active = value_rank_begin < length;
+			u32 const value_rank_begin		= block_rank * VALUES_PER_BLOCK + block.thread_rank() * VALUES_PER_THREAD;
+			bool const is_thread_active		= value_rank_begin < length;
+			bool const is_warp_active		= warp.any(is_thread_active);
 
 			T thread_reduction = identity<T>();
 			T thread_tile[VALUES_PER_THREAD];
-			
-			for (u32 i = 0; i < VALUES_PER_THREAD; ++i) {
-				u32 const value_rank = value_rank_begin + i;
-				if (not (value_rank < length)) break;
-				
-				T const value = values[value_rank];
-				
-				thread_reduction += value;
-				thread_tile[i] = thread_reduction;
+
+			T thread_exclusive_prefix		= identity<T>();
+			T warp_exclusive_prefix			= identity<T>();
+			T block_exclusive_prefix 		= identity<T>();
+
+			if (value_rank_begin + VALUES_PER_THREAD <= length) {
+				for (u32 i = 0; i < sizeof(thread_tile) / sizeof(float4); ++i) {
+					*(reinterpret_cast<float4 *>(thread_tile) + i) = *(reinterpret_cast<float4 const *>(values + value_rank_begin) + i);
+				}
+				for (u32 i = 1; i < VALUES_PER_THREAD; ++i) {
+					thread_tile[i] += thread_tile[i - 1];
+				}
+				thread_reduction = thread_tile[VALUES_PER_THREAD - 1];
+			} else {
+				for (u32 i = 0; i < VALUES_PER_THREAD; ++i) {
+					u32 const value_rank = value_rank_begin + i;
+					if (value_rank >= length) break;
+					
+					T const value = values[value_rank];
+					
+					thread_reduction += value;
+					thread_tile[i] = thread_reduction;
+				}
 			}
 
-			T const thread_prefix_in_partition = exclusive_scan(block, is_active, thread_reduction);
+			if (is_warp_active) {
 
-			bool const is_last = thread_rank + 1 == num_threads;
+				thread_exclusive_prefix = cg::exclusive_scan(warp, thread_reduction);
 
-			__shared__ T s_block_exclusive_prefix;
-
-			if (is_last) {
-				part_descs[block_rank].aggregate = thread_prefix_in_partition + thread_reduction;
-				__threadfence();
-				part_descs[block_rank].status = partition_status::aggregated;
-
-				T block_exclusive_prefix = identity<T>();
-
-				for (i32 i = block_rank - 1; 0 <= i; --i) {
-					partition_status status;
-					do status = part_descs[i].status; while (partition_status::invalid == status);
-					if (partition_status::prefixed == status) {
-						block_exclusive_prefix += part_descs[i].inclusive_prefix;
+				if (warp.thread_rank() + 1 == warp.num_threads()) {
+					warp_desc[warp.meta_group_rank()].aggregate = thread_exclusive_prefix + thread_reduction;
+					__threadfence_block();
+					warp_desc[warp.meta_group_rank()].status = block_rank + 1;
+				}
+				
+				for (i32 i = warp.meta_group_rank() - 1; 0 <= i; --i) {
+					u32 status;
+					do status = warp_desc[i].status; while (status < block_rank + 1);
+					if (status > block_rank + 1) {
+						warp_exclusive_prefix += warp_desc[i].inclusive_prefix;
 						break;
 					} else {
-						block_exclusive_prefix += part_descs[i].aggregate;
+						warp_exclusive_prefix += warp_desc[i].aggregate;
 					}
 				}
 
-				s_block_exclusive_prefix = block_exclusive_prefix;
-			}
+				if (warp.thread_rank() + 1 == warp.num_threads()) {
+					T const warp_thread_inclusive_prefix = warp_exclusive_prefix + thread_exclusive_prefix + thread_reduction;
+					if (warp.meta_group_rank() + 1 == warp.meta_group_size()) {
+						// the last warp in the block
+						block_desc[block_rank].aggregate = warp_thread_inclusive_prefix;
+						__threadfence();
+						block_desc[block_rank].status = block_status::aggregated;
+					} else {
+						// not the last warp
+						warp_desc[warp.meta_group_rank()].inclusive_prefix = warp_thread_inclusive_prefix;
+						__threadfence_block();
+						warp_desc[warp.meta_group_rank()].status = block_rank + 2;
+					}
+				}
+
+				for (i32 i = block_rank - 1; 0 <= i; --i) {
+					block_status status;
+					do status = block_desc[i].status; while (block_status::invalid == status);
+					if (block_status::prefixed == status) {
+						block_exclusive_prefix += block_desc[i].inclusive_prefix;
+						break;
+					} else {
+						block_exclusive_prefix += block_desc[i].aggregate;
+					}
+				}
+
+				if (warp.meta_group_rank() + 1 == warp.meta_group_size() and warp.thread_rank() + 1 == warp.num_threads()) {
+					T const block_warp_thread_inclusive_prefix = block_exclusive_prefix + warp_exclusive_prefix + thread_exclusive_prefix + thread_reduction;
+					block_desc[block_rank].inclusive_prefix = block_warp_thread_inclusive_prefix;
+					__threadfence();
+					block_desc[block_rank].status = block_status::prefixed;
+				}
+
+			} // is_warp_active
 
 			block.sync();
 
-			T const block_exclusive_prefix = s_block_exclusive_prefix;
-			// [todo] it seems that there is no need to synchronize?
-
-			if (is_last) {
-				part_descs[block_rank].inclusive_prefix = block_exclusive_prefix + thread_prefix_in_partition + thread_reduction;
-				__threadfence();
-				part_descs[block_rank].status = partition_status::prefixed;
+			if (value_rank_begin + 4 <= length) {
+				for (u32 i = 0; i < VALUES_PER_THREAD; ++i) {
+					thread_tile[i] += block_exclusive_prefix + warp_exclusive_prefix + thread_exclusive_prefix;
+				}
+				for (u32 i = 0; i < sizeof(thread_tile) / sizeof(float4); ++i) {
+					*(reinterpret_cast<float4 *>(results + value_rank_begin) + i) = *(reinterpret_cast<float4 const *>(thread_tile) + i);
+				}
+			} else {
+				for (u32 i = 0; i < VALUES_PER_THREAD; ++i) {
+					u32 const value_rank = value_rank_begin + i;
+					if (value_rank >= length) break;
+					
+					results[value_rank] = block_exclusive_prefix + warp_exclusive_prefix + thread_exclusive_prefix + thread_tile[i];
+				}
 			}
 
-			for (u32 i = 0; i < VALUES_PER_THREAD; ++i) {
-				u32 const value_rank = value_rank_begin + i;
-				if (not (value_rank < length)) break;
-				
-				results[value_rank] = block_exclusive_prefix + thread_prefix_in_partition + thread_tile[i];
+			if (block_rank + 1 == block_rank_count and block.thread_rank() == 0) {
+				free(const_cast<void *>(reinterpret_cast<void volatile *>(block_desc)));
 			}
 			
-		}
+		} // for block_rank
 
 	}
 
@@ -354,10 +430,10 @@ namespace spp {
 
 	template <typename T>
 	cudaError_t inclusive_scan(u32 length, T const * values, T * results) {
-		constexpr u32 threads_per_block = 128;
+		constexpr u32 threads_per_block = 512;
 		constexpr u32 items_per_thread = 4;
 
-		void * fn = (void *)kernel_inclusive_scan_look_back<T, threads_per_block, items_per_thread>;
+		void * fn = (void *)global_inclusive_scan<T, threads_per_block, items_per_thread>;
 
 		cudaDeviceProp device_prop;
 		cudaGetDeviceProperties(&device_prop, 0);
