@@ -131,39 +131,91 @@ namespace spp {
 	void global_inclusive_scan(u32 length, T const * values, T * results) {
 
 		constexpr u32 VALUES_PER_BLOCK	= THREADS_PER_BLOCK * VALUES_PER_THREAD;
-		// constexpr u32 WARPS_PER_BLOCK	= THREADS_PER_BLOCK / 32;
+		constexpr u32 WARPS_PER_BLOCK	= THREADS_PER_BLOCK / 32;
+
+		constexpr u32 BARRIER_PRODUCER	= 1;
+		constexpr u32 BARRIER_CONSUMER	= 2;
 
 		cg::grid_group grid				= cg::this_grid();
 		cg::thread_block block			= cg::this_thread_block();
-		// cg::thread_block_tile<32> warp	= cg::tiled_partition<32>(block);
+		cg::thread_block_tile<32> warp	= cg::tiled_partition<32>(block);
 
 		u32 const block_rank_begin	= grid.block_rank();
 		u32 const block_rank_step	= grid.num_blocks();
-		u32 const block_rank_end	= (length + VALUES_PER_BLOCK - 1) / VALUES_PER_BLOCK;
+		u32 const block_rank_count	= (length + VALUES_PER_BLOCK - 1) / VALUES_PER_BLOCK;
 
-		u32 const thread_rank		= block.thread_rank();
 
-		if (block_rank_begin == 0 and thread_rank == 0) {
-			*reinterpret_cast<T * *>(results) = static_cast<T *>(malloc(sizeof(T) * block_rank_end));
+
+		if (grid.block_rank() == 0 and block.thread_rank() == 0) {
+			*reinterpret_cast<T volatile * *>(results) = static_cast<T volatile *>(malloc(sizeof(T) * block_rank_count));
 		}
 
 		grid.sync();
 		
-		T * block_aggregates = *reinterpret_cast<T * *>(results);
+		T volatile * block_partial_results = *reinterpret_cast<T volatile * *>(results);
 
-		for (u32 block_rank = block_rank_begin; block_rank < block_rank_end; block_rank += block_rank_step) {
-			u32 const item_rank_begin = block_rank * VALUES_PER_BLOCK + thread_rank * VALUES_PER_THREAD;
 
-			bool const is_active = item_rank_begin < length;
-			T thread_item = identity<T>();
-			for (u32 i = 0; i < VALUES_PER_THREAD; ++i) {
-				const u32 item_rank = item_rank_begin + i;
-				if (not (item_rank < length)) break;
-				thread_item += values[item_rank];
+
+		__shared__ T warp_partial_results[WARPS_PER_BLOCK];
+
+
+
+		if (warp.meta_group_rank() == 0) {
+			ptx_barrier_arrive(BARRIER_CONSUMER, THREADS_PER_BLOCK);
+		}
+
+		for (u32 block_rank = block_rank_begin; block_rank < block_rank_count; block_rank += block_rank_step) {
+			u32 const value_rank_begin = block_rank * VALUES_PER_BLOCK + block.thread_rank() * VALUES_PER_THREAD;
+
+			T thread_tile[VALUES_PER_THREAD];
+			T thread_value = identity<T>();
+
+			if (value_rank_begin + VALUES_PER_THREAD <= length) {
+				for (u32 i = 0; i < sizeof(thread_tile) / sizeof(float4); ++i) {
+					reinterpret_cast<float4 *>(thread_tile)[i] = reinterpret_cast<float4 const *>(values + value_rank_begin)[i];
+				}
+			} else {
+				for (u32 i = 0; i < VALUES_PER_THREAD; ++i) {
+					const u32 value_rank = value_rank_begin + i;
+					thread_tile[i] = value_rank < length ? values[value_rank] : identity<T>();
+				}
 			}
-			T const block_reduction = reduce(block, is_active, thread_item);
+			
+			for (u32 i = 0; i < VALUES_PER_THREAD; ++i) {
+				thread_value += thread_tile[i];
+			}
 
-			if (thread_rank == 0) block_aggregates[block_rank] = block_reduction;
+			bool const is_thread_active = value_rank_begin < length;
+			T thread_reduction = identity<T>();
+
+			if (is_thread_active) {
+				cg::coalesced_group active = cg::coalesced_threads();
+				thread_reduction = cg::reduce(active, thread_value, cg::plus<T>());	
+			}
+
+			if (warp.meta_group_rank() != 0) {
+				ptx_barrier_sync(BARRIER_CONSUMER, THREADS_PER_BLOCK);
+			}
+
+			if (warp.thread_rank() == 0) {
+				warp_partial_results[warp.meta_group_rank()] = thread_reduction;
+			}
+
+			if (warp.meta_group_rank() != 0) {
+				ptx_barrier_arrive(BARRIER_PRODUCER, THREADS_PER_BLOCK);
+			} else {
+				ptx_barrier_sync(BARRIER_PRODUCER, THREADS_PER_BLOCK);
+
+				if (warp.thread_rank() < WARPS_PER_BLOCK) {
+					T const warp_reduction = warp_partial_results[warp.thread_rank()];
+					T const block_reduction = cg::reduce(cg::coalesced_threads(), warp_reduction, cg::plus<T>());
+					if (warp.thread_rank() == 0) {
+						block_partial_results[block_rank] = block_reduction;
+					}
+				}
+				
+				ptx_barrier_arrive(BARRIER_CONSUMER, THREADS_PER_BLOCK);
+			}
 		}
 
 		grid.sync();
@@ -171,14 +223,14 @@ namespace spp {
 		if (grid.block_rank() == 0) {
 			T global_prefix = identity<T>();
 			
-			for (u32 i = 0; i < (block_rank_end + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK; ++i) {
-				u32 agg_rank = i * THREADS_PER_BLOCK + thread_rank;
-				bool const is_active = agg_rank < block_rank_end;
+			for (u32 i = 0; i < (block_rank_count + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK; ++i) {
+				u32 agg_rank = i * THREADS_PER_BLOCK + block.thread_rank();
+				bool const is_active = agg_rank < block_rank_count;
 
-				T const aggregate = is_active ? block_aggregates[agg_rank] : identity<T>();
+				T const aggregate = is_active ? block_partial_results[agg_rank] : identity<T>();
 				T const local_prefix = exclusive_scan(block, is_active, aggregate);
 				if (is_active)
-					block_aggregates[agg_rank] = global_prefix + local_prefix;
+					block_partial_results[agg_rank] = global_prefix + local_prefix;
 				
 				__shared__ T aggregate_reduction;
 
@@ -195,33 +247,51 @@ namespace spp {
 
 		grid.sync();
 
-		for (u32 block_rank = block_rank_begin; block_rank < block_rank_end; block_rank += block_rank_step) {
-			u32 const item_rank_begin = block_rank * VALUES_PER_BLOCK + thread_rank * VALUES_PER_THREAD;
-
-			bool const is_active = item_rank_begin < length;
+		for (u32 block_rank = block_rank_begin; block_rank < block_rank_count; block_rank += block_rank_step) {
+			u32 const value_rank_begin = block_rank * VALUES_PER_BLOCK + block.thread_rank() * VALUES_PER_THREAD;
 			
-			T thread_items[VALUES_PER_THREAD] = {};
+			T thread_tile[VALUES_PER_THREAD];
 
-			for (u32 i = 0; i < VALUES_PER_THREAD; ++i) {
-				u32 const item_rank = item_rank_begin + i;
-				if (not (item_rank < length)) break;
-				T const item = values[item_rank];
-				for (u32 j = i; j < VALUES_PER_THREAD; ++j) thread_items[j] += item;
+			if (value_rank_begin + VALUES_PER_THREAD <= length) {
+				for (u32 i = 0; i < sizeof(thread_tile) / sizeof(float4); ++i) {
+					reinterpret_cast<float4 *>(thread_tile)[i] = reinterpret_cast<float4 const *>(values + value_rank_begin)[i];
+				}
+			} else {
+				for (u32 i = 0; i < VALUES_PER_THREAD; ++i) {
+					const u32 value_rank = value_rank_begin + i;
+					thread_tile[i] = value_rank < length ? values[value_rank] : identity<T>();
+				}
 			}
 
-			T const thread_partial_result = exclusive_scan(block, is_active, thread_items[VALUES_PER_THREAD - 1]);
+			for (u32 i = 1; i < VALUES_PER_THREAD; ++i) {
+				thread_tile[i] += thread_tile[i - 1];
+			}
+
+			bool const is_active = value_rank_begin < length;
+			T const thread_partial_result = exclusive_scan(block, is_active, thread_tile[VALUES_PER_THREAD - 1]);
 		
 			for (u32 i = 0; i < VALUES_PER_THREAD; ++i) {
-				u32 const item_rank = item_rank_begin + i;
-				if (not (item_rank < length)) break;
-				results[item_rank] = block_aggregates[block_rank] + thread_partial_result + thread_items[i];
+				thread_tile[i] += block_partial_results[block_rank] + thread_partial_result;
+			}
+
+			if (value_rank_begin + VALUES_PER_THREAD <= length) {
+				for (u32 i = 0; i < sizeof(thread_tile) / sizeof(float4); ++i) {
+					reinterpret_cast<float4 *>(results + value_rank_begin)[i] = reinterpret_cast<float4 const *>(thread_tile)[i];
+				}
+			} else {
+				for (u32 i = 0; i < VALUES_PER_THREAD; ++i) {
+					const u32 value_rank = value_rank_begin + i;
+					if (value_rank < length) {
+						results[value_rank] = thread_tile[i];
+					}
+				}
 			}
 		}
 
 		grid.sync();
 
-		if (block_rank_begin == 0 and thread_rank == 0)
-			free(block_aggregates);
+		if (block_rank_begin == 0 and block.thread_rank() == 0)
+			free(static_cast<void *>(const_cast<T *>(block_partial_results)));
 		
 	} // inclusive_scan
 
@@ -263,18 +333,29 @@ namespace spp {
 
 		constexpr u32 VALUES_PER_BLOCK	= VALUES_PER_THREAD * THREADS_PER_BLOCK;
 		constexpr u32 WARPS_PER_BLOCK	= THREADS_PER_BLOCK / 32;
-		
+
 		cg::grid_group grid				= cg::this_grid();
 		cg::thread_block block			= cg::this_thread_block();
 		cg::thread_block_tile<32> warp	= cg::tiled_partition<32>(block);
 
 
 
-		__shared__ volatile warp_descriptor<T> warp_desc[WARPS_PER_BLOCK];
+		constexpr u32 BAR_BLOCK_PRODUCED			= 1;
+		constexpr u32 BAR_BLOCK_PRODUCED_THREADS	= THREADS_PER_BLOCK;
 
-		if (warp.thread_rank() == 0) {
-			warp_desc[warp.meta_group_rank()].status = static_cast<u32>(grid.block_rank());
-		}
+		constexpr u32 BAR_BLOCK_CONSUMED			= 2;
+		constexpr u32 BAR_BLOCK_CONSUMED_THREADS	= THREADS_PER_BLOCK;
+
+		constexpr u32 BAR_WARP_PRODUCED				= 3;
+		constexpr u32 BAR_WARP_PRODUCED_THREADS		= THREADS_PER_BLOCK;
+
+		constexpr u32 BAR_OTHER_WARPS_CONSUMED			= 4;
+		constexpr u32 BAR_OTHER_WARPS_CONSUMED_THREADS	= THREADS_PER_BLOCK - 32;
+
+		constexpr u32 BAR_FIRST_WARP_CONSUMED			= 5;
+		constexpr u32 BAR_FIRST_WARP_CUNSUMED_THREADS	= 32 * 2;
+
+
 
 		block_descriptor<T> volatile * block_desc;
 
@@ -307,22 +388,33 @@ namespace spp {
 
 
 
+		__shared__ T warp_partial_results[WARPS_PER_BLOCK];
+
+
+
 		u32 const block_rank_begin		= grid.block_rank();
 		u32 const block_rank_step		= grid.num_blocks();
 		u32 const block_rank_count		= ceiled_div(length, VALUES_PER_BLOCK);
 
+		if (warp.meta_group_rank() != 0) {
+			ptx_barrier_arrive(BAR_BLOCK_CONSUMED, BAR_BLOCK_CONSUMED_THREADS);
+		}
+
+		if (warp.meta_group_rank() + 1 != warp.meta_group_size()) {
+			ptx_barrier_arrive(BAR_FIRST_WARP_CONSUMED, BAR_FIRST_WARP_CUNSUMED_THREADS);
+		}
+
 		for (u32 block_rank = block_rank_begin; block_rank < block_rank_count; block_rank += block_rank_step) {
 			
 			u32 const value_rank_begin		= block_rank * VALUES_PER_BLOCK + block.thread_rank() * VALUES_PER_THREAD;
-			bool const is_thread_active		= value_rank_begin < length;
-			bool const is_warp_active		= warp.any(is_thread_active);
 
-			T thread_reduction = identity<T>();
+			// bool const is_thread_active		= value_rank_begin < length;
+			// bool const is_warp_active		= warp.any(is_thread_active);
+
 			T thread_tile[VALUES_PER_THREAD];
+			T thread_reduction = identity<T>();
 
-			T thread_exclusive_prefix		= identity<T>();
-			T warp_exclusive_prefix			= identity<T>();
-			T block_exclusive_prefix 		= identity<T>();
+			__shared__ T shared_block_exclusive_prefix;
 
 			if (value_rank_begin + VALUES_PER_THREAD <= length) {
 				for (u32 i = 0; i < sizeof(thread_tile) / sizeof(float4); ++i) {
@@ -344,63 +436,89 @@ namespace spp {
 				}
 			}
 
-			if (is_warp_active) {
+			T thread_exclusive_prefix	= cg::exclusive_scan(warp, thread_reduction);
+			T warp_exclusive_prefix		= identity<T>();
+			T block_exclusive_prefix 	= identity<T>();
 
-				thread_exclusive_prefix = cg::exclusive_scan(warp, thread_reduction);
+			if (warp.meta_group_rank() == 0) {
+				ptx_barrier_sync(BAR_FIRST_WARP_CONSUMED, BAR_FIRST_WARP_CUNSUMED_THREADS);
+			}
+
+			if (warp.thread_rank() + 1 == warp.num_threads()) {
+				warp_partial_results[warp.meta_group_rank()] = thread_exclusive_prefix + thread_reduction;
+			}
+
+			if (warp.meta_group_rank() == 0) {
+				// the first warp calculates the exclusive prefix of this block
+
+				ptx_barrier_arrive(BAR_WARP_PRODUCED, BAR_WARP_PRODUCED_THREADS);
+
+				if (warp.thread_rank() == 0) {
+					for (i32 i = block_rank - 1; 0 <= i; --i) {
+						block_status status;
+						do status = block_desc[i].status; while (block_status::invalid == status);
+						if (block_status::prefixed == status) {
+							block_exclusive_prefix += block_desc[i].inclusive_prefix;
+							break;
+						} else {
+							block_exclusive_prefix += block_desc[i].aggregate;
+						}
+					}
+				}
+
+				block_exclusive_prefix = warp.shfl(block_exclusive_prefix, 0);
+
+				ptx_barrier_sync(BAR_BLOCK_CONSUMED, BAR_BLOCK_CONSUMED_THREADS);
+				if (warp.thread_rank() == 0) {
+					shared_block_exclusive_prefix = block_exclusive_prefix;
+				}
+				ptx_barrier_arrive(BAR_BLOCK_PRODUCED, BAR_BLOCK_PRODUCED_THREADS);
+			}
+			else if (warp.meta_group_rank() + 1 != warp.meta_group_size()) {
+				// warps neither first nor last
+
+				ptx_barrier_arrive(BAR_WARP_PRODUCED, BAR_WARP_PRODUCED_THREADS);
+
+				ptx_barrier_sync(BAR_OTHER_WARPS_CONSUMED, BAR_OTHER_WARPS_CONSUMED_THREADS);
+				warp_exclusive_prefix = warp_partial_results[warp.meta_group_rank()];
+
+				ptx_barrier_sync(BAR_BLOCK_PRODUCED, BAR_BLOCK_PRODUCED_THREADS);
+				block_exclusive_prefix = shared_block_exclusive_prefix;
+				ptx_barrier_arrive(BAR_BLOCK_CONSUMED, BAR_BLOCK_CONSUMED_THREADS);
+			}
+			else {
+				// the last warp calculates the exclusive prefixes of all warps
+
+				ptx_barrier_sync(BAR_WARP_PRODUCED, BAR_WARP_PRODUCED_THREADS);
+
+				if (warp.thread_rank() < WARPS_PER_BLOCK) {
+					cg::coalesced_group active = cg::coalesced_threads();
+					T const warp_partial_result = warp_partial_results[warp.thread_rank()];
+					warp_partial_results[warp.thread_rank()] = cg::exclusive_scan(active, warp_partial_result);					
+				}
+				warp_exclusive_prefix = warp_partial_results[warp.meta_group_rank()];
+
+				ptx_barrier_arrive(BAR_FIRST_WARP_CONSUMED, BAR_FIRST_WARP_CUNSUMED_THREADS);
+				ptx_barrier_arrive(BAR_OTHER_WARPS_CONSUMED, BAR_OTHER_WARPS_CONSUMED_THREADS);
 
 				if (warp.thread_rank() + 1 == warp.num_threads()) {
-					warp_desc[warp.meta_group_rank()].aggregate = thread_exclusive_prefix + thread_reduction;
-					__threadfence_block();
-					warp_desc[warp.meta_group_rank()].status = block_rank + 1;
+					block_desc[block_rank].aggregate = warp_exclusive_prefix + thread_exclusive_prefix + thread_reduction;
+					__threadfence();
+					block_desc[block_rank].status = block_status::aggregated;
 				}
-				
-				for (i32 i = warp.meta_group_rank() - 1; 0 <= i; --i) {
-					u32 status;
-					do status = warp_desc[i].status; while (status < block_rank + 1);
-					if (status > block_rank + 1) {
-						warp_exclusive_prefix += warp_desc[i].inclusive_prefix;
-						break;
-					} else {
-						warp_exclusive_prefix += warp_desc[i].aggregate;
-					}
-				}
+
+				ptx_barrier_sync(BAR_BLOCK_PRODUCED, BAR_BLOCK_PRODUCED_THREADS);
+				block_exclusive_prefix = shared_block_exclusive_prefix;
+				ptx_barrier_arrive(BAR_BLOCK_CONSUMED, BAR_BLOCK_CONSUMED_THREADS);
 
 				if (warp.thread_rank() + 1 == warp.num_threads()) {
-					T const warp_thread_inclusive_prefix = warp_exclusive_prefix + thread_exclusive_prefix + thread_reduction;
-					if (warp.meta_group_rank() + 1 == warp.meta_group_size()) {
-						// the last warp in the block
-						block_desc[block_rank].aggregate = warp_thread_inclusive_prefix;
-						__threadfence();
-						block_desc[block_rank].status = block_status::aggregated;
-					} else {
-						// not the last warp
-						warp_desc[warp.meta_group_rank()].inclusive_prefix = warp_thread_inclusive_prefix;
-						__threadfence_block();
-						warp_desc[warp.meta_group_rank()].status = block_rank + 2;
-					}
-				}
-
-				for (i32 i = block_rank - 1; 0 <= i; --i) {
-					block_status status;
-					do status = block_desc[i].status; while (block_status::invalid == status);
-					if (block_status::prefixed == status) {
-						block_exclusive_prefix += block_desc[i].inclusive_prefix;
-						break;
-					} else {
-						block_exclusive_prefix += block_desc[i].aggregate;
-					}
-				}
-
-				if (warp.meta_group_rank() + 1 == warp.meta_group_size() and warp.thread_rank() + 1 == warp.num_threads()) {
-					T const block_warp_thread_inclusive_prefix = block_exclusive_prefix + warp_exclusive_prefix + thread_exclusive_prefix + thread_reduction;
-					block_desc[block_rank].inclusive_prefix = block_warp_thread_inclusive_prefix;
+					block_desc[block_rank].inclusive_prefix = block_exclusive_prefix + warp_exclusive_prefix + thread_exclusive_prefix + thread_reduction;
 					__threadfence();
 					block_desc[block_rank].status = block_status::prefixed;
 				}
+			}
 
-			} // is_warp_active
 
-			block.sync();
 
 			if (value_rank_begin + 4 <= length) {
 				for (u32 i = 0; i < VALUES_PER_THREAD; ++i) {
@@ -430,10 +548,10 @@ namespace spp {
 
 	template <typename T>
 	cudaError_t inclusive_scan(u32 length, T const * values, T * results) {
-		constexpr u32 threads_per_block = 512;
-		constexpr u32 items_per_thread = 4;
+		constexpr u32 threads_per_block = 128;
+		constexpr u32 items_per_thread = 16;
 
-		void * fn = (void *)global_inclusive_scan<T, threads_per_block, items_per_thread>;
+		void * fn = (void *)kernel_inclusive_scan_look_back<T, threads_per_block, items_per_thread>;
 
 		cudaDeviceProp device_prop;
 		cudaGetDeviceProperties(&device_prop, 0);
