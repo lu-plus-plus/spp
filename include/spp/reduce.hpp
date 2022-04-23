@@ -386,6 +386,8 @@ namespace spp {
 			block_desc = *reinterpret_cast<block_descriptor<T> * *>(results);
 		}
 
+		grid.sync();
+
 
 
 		__shared__ T warp_partial_results[WARPS_PER_BLOCK];
@@ -400,7 +402,7 @@ namespace spp {
 			ptx_barrier_arrive(BAR_BLOCK_CONSUMED, BAR_BLOCK_CONSUMED_THREADS);
 		}
 
-		if (warp.meta_group_rank() + 1 != warp.meta_group_size()) {
+		if (warp.meta_group_rank() + 1 == warp.meta_group_size()) {
 			ptx_barrier_arrive(BAR_FIRST_WARP_CONSUMED, BAR_FIRST_WARP_CUNSUMED_THREADS);
 		}
 
@@ -536,7 +538,7 @@ namespace spp {
 				}
 			}
 
-			if (block_rank + 1 == block_rank_count and block.thread_rank() == 0) {
+			if (block_rank + 1 == block_rank_count and block.thread_rank() + 1 == block.num_threads()) {
 				free(const_cast<void *>(reinterpret_cast<void volatile *>(block_desc)));
 			}
 			
@@ -548,7 +550,7 @@ namespace spp {
 
 	template <typename T>
 	cudaError_t inclusive_scan(u32 length, T const * values, T * results) {
-		constexpr u32 threads_per_block = 128;
+		constexpr u32 threads_per_block = 1024;
 		constexpr u32 items_per_thread = 16;
 
 		void * fn = (void *)kernel_inclusive_scan_look_back<T, threads_per_block, items_per_thread>;
@@ -559,161 +561,16 @@ namespace spp {
 		i32 blocks_per_sm = 0;
 		cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks_per_sm, fn, threads_per_block, 0);
 
-		// printf("Number of Processor: %d\n", device_prop.multiProcessorCount);
-		// printf("Blocks per Processor: %d\n", blocks_per_sm);
+		// printf("Max Blocks Per Processor: %d\n", device_prop.maxBlocksPerMultiProcessor);
+		// printf("Max Threads Per Processor: %d\n", device_prop.maxThreadsPerMultiProcessor);
+		// printf("Queried Number of Processor: %d\n", device_prop.multiProcessorCount);
+		// printf("Queried Blocks per Processor: %d\n", blocks_per_sm);
 
 		dim3 const grid_dim(blocks_per_sm * device_prop.multiProcessorCount, 1, 1);
 		dim3 const block_dim(threads_per_block, 1, 1);
 		void * args[] = { &length, &values, &results };
 		return cudaLaunchCooperativeKernel(fn, grid_dim, block_dim, args);
 	}
-
-
-
-	// template <typename T, typename K>
-	// __device__
-	// void warp_segmented_reduce(T & value, K & key, T * buffer, uint32_t buffer_base) {
-	// 	for (uint32_t delta = 1; delta < 32; delta *= 2) {
-	// 		K const neighbor_key = __shfl_down_sync(0xFFFFFFFFu, key, delta);
-			
-	// 		bool const is_partial = key == neighbor_key;
-	// 		bool const any_partial = __any_sync(0xFFFFFFFFu, is_partial);
-	// 		if (not any_partial) break;
-
-	// 		if constexpr (warp_shufflable_v<T>) {
-	// 			if (is_partial) value += __shfl_down_sync(0xFFFFFFFFu, value, delta);
-	// 		} else {
-	// 			if (is_partial) buffer[buffer_base] = value;
-	// 			__syncwarp();
-	// 			if (is_partial) value += buffer[buffer_base + delta];
-	// 			__syncwarp();
-	// 		}
-	// 	}
-	// }
-
-
-
-	// // template <typename Value, typename Index>
-	// // void reduce(Value const * values, Index const * keys, Value * results, Index size);
-
-	// template <typename Value, typename Index>
-	// __global__
-	// void reduce_impl(Value const * values, Index const * keys, Value * results, Index size) {
-
-	// 	constexpr Index BlockDim		= 1024;
-	// 	constexpr Index WarpDim			= 32;
-	// 	constexpr Index WarpCount		= 32;
-
-	// 	constexpr unsigned WarpMask		= 0xFFFFFFFFu;
-
-	// 	Index const warp_idx			= threadIdx.x / WarpDim;
-	// 	Index const thread_idx_in_warp	= threadIdx.x % WarpDim;
-
-	// 	Index const block_head_offset	= blockIdx.x * BlockDim;
-	// 	Index const block_head_seg		= keys[block_head_offset];
-
-	// 	Index const block_last_offset	= block_head_offset + BlockDim - 1;
-	// 	Index const block_last_seg		= block_last_offset < size ? keys[block_last_offset] : all_bits<Index>();
-
-	// 	Index const warp_head_offset	= block_head_offset + warp_idx * WarpDim;
-	// 	Index const warp_head_seg		= warp_head_offset < size ? keys[warp_head_offset] : all_bits<Index>();
-
-	// 	Index const warp_last_offset	= warp_head_offset + WarpDim - 1;
-	// 	Index const warp_last_seg		= warp_last_offset < size ? keys[warp_last_offset] : all_bits<Index>();
-
-	// 	Index const this_offset			= block_head_offset + threadIdx.x;
-	// 	Value this_value				= this_offset < size ? values[this_offset] : identity<Value>();
-
-	// 	/* the segments to which this thread and the last one belong */
-
-	// 	Index last_and_this_segs[2] = { all_bits<Index>(), all_bits<Index>() };
-	// 	if (this_offset == 0) {
-	// 		last_and_this_segs[1] = keys[this_offset];
-	// 	} else if (this_offset < size) {
-	// 		last_and_this_segs[0] = keys[this_offset - 1];
-	// 		last_and_this_segs[1] = keys[this_offset];
-	// 		// *(uint64_t *)(last_and_this_segs) = *(uint64_t const *)(keys + this_offset - 1);
-	// 	}
-	// 	Index const & last_seg = last_and_this_segs[0];
-	// 	Index const & this_seg = last_and_this_segs[1];
-
-	// 	bool const is_this_inbound	= this_seg != all_bits<Index>();
-	// 	bool const is_atomic_needed	= is_this_inbound and (this_seg == block_head_seg or this_seg == block_last_seg);
-	// 	bool const is_shared_needed	= is_this_inbound and (this_seg == warp_head_seg or this_seg == warp_last_seg);
-	// 	bool const is_seg_head		= is_this_inbound and (block_head_offset == this_offset or last_seg != this_seg);
-
-	// 	__shared__ Value warp_elem_exchange[WarpDim];
-	// 	__shared__ Index warp_seg_exchange[WarpDim];
-
-	// 	if (thread_idx_in_warp == 0) {
-	// 		warp_elem_exchange[warp_idx] = this_value;
-	// 		warp_seg_exchange[warp_idx] = this_seg;
-	// 	}
-
-	// 	/* reduction among threads inside a warp */
-
-	// 	__shared__ Value thread_elem_exchange[BlockDim + WarpDim];
-
-	// 	for (Index delta = 1; delta < WarpDim; delta *= 2) {
-	// 		Index const neighbor_seg = __shfl_down_sync(WarpMask, this_seg, delta);
-
-	// 		bool const is_partial = is_this_inbound and this_seg == neighbor_seg;
-	// 		bool const any_partial = __any_sync(WarpMask, is_partial);
-	// 		if (not any_partial) break;
-			
-	// 		if (is_partial) thread_elem_exchange[threadIdx.x] = this_value;
-	// 		__syncwarp();
-	// 		if (is_partial) this_value += thread_elem_exchange[threadIdx.x + delta];
-	// 		__syncwarp();
-	// 	}
-
-	// 	if (is_seg_head and not is_shared_needed) {
-	// 		results[this_seg] = this_value;
-	// 	}
-
-	// 	__syncthreads();
-
-	// 	/* reduction among warps inside a block */
-
-	// 	if (warp_idx + 1 < WarpDim) {
-
-	// 		Value warp_elem = warp_elem_exchange[thread_idx_in_warp];
-	// 		Index const this_warp_tail_seg = __shfl_sync(WarpMask, this_seg, WarpDim - 1);
-	// 		Index const all_warps_head_seg = warp_seg_exchange[thread_idx_in_warp];
-	// 		if (all_warps_head_seg != this_warp_tail_seg) all_warps_head_seg += 32;
-
-	// 		for (Index delta = 1; delta < WarpDim; delta *= 2) {
-	// 			Index const neighbor_seg = __shfl_down_sync(WarpMask, all_warps_head_seg, delta);
-
-	// 			bool const is_partial = all_warps_head_seg == neighbor_seg;
-	// 			bool const any_partial = __any_sync(WarpMask, is_partial);
-	// 			if (not any_partial) break;
-				
-	// 			if (is_partial) thread_elem_exchange[threadIdx.x] = warp_elem;
-	// 			__syncwarp();
-	// 			if (is_partial) warp_elem += thread_elem_exchange[threadIdx.x + delta];
-	// 			__syncwarp();
-	// 		}
-
-	// 		Index const next_warp_head_seg = __shfl_sync(WarpMask, all_warps_head_seg, warp_idx + 1);
-	// 		if (this_warp_tail_seg == next_warp_head_seg) {
-	// 			if (thread_idx_in_warp == warp_idx + 1) thread_elem_exchange[warp_idx * 32] = warp_elem;
-	// 			__syncwarp();
-	// 			if (is_seg_head) this_value += thread_elem_exchange[warp_idx * 32];
-	// 			__syncwarp();
-	// 		}
-			
-	// 	}
-
-	// 	if (is_seg_head and not is_atomic_needed) {
-	// 		results[this_seg] = this_value;
-	// 	} else {
-	// 		while (atomicCAS(locks + this_seg, 0, 1) == 0) continue;
-	// 		results[this_seg] = this_value;
-	// 		locks[this_seg] = 0;
-	// 	}
-
-	// }
 
 }
 
