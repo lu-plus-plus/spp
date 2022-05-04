@@ -58,6 +58,72 @@ DEFINE_PRIMITIVE(F64, f64, double);
 
 
 
+template <u64 S>
+struct Byte {
+	
+	struct nothing {} paddings[S];
+	
+	__host__ __device__
+	static void copy(Byte * dst, Byte const * src) {
+		for (u64 i = 0; (i + 1) * 16 <= S; ++i) {
+			reinterpret_cast<int4 *>(dst)[i] = reinterpret_cast<int4 const *>(src)[i];
+		}
+		
+		if constexpr (constexpr u64 i = S / 16 * 2; (i + 1) * 8 <= S) {
+			reinterpret_cast<int2 *>(dst)[i] = reinterpret_cast<int2 const *>(src)[i];
+		}
+		
+		if constexpr (constexpr u64 i = S / 8 * 2; (i + 1) * 4 <= S) {
+			reinterpret_cast<int1 *>(dst)[i] = reinterpret_cast<int1 const *>(src)[i];
+		}
+		
+		if constexpr (constexpr u64 i = S / 4 * 2; (i + 1) * 2 <= S) {
+			reinterpret_cast<short1 *>(dst)[i] = reinterpret_cast<short1 const *>(src)[i];
+		}
+
+		if constexpr (constexpr u64 i = S / 2 * 2; i < S) {
+			reinterpret_cast<char1 *>(dst)[i] = reinterpret_cast<char1 const *>(src)[i];
+		}
+	}
+
+	Byte() = default;
+
+	__host__ __device__
+	Byte(Byte const & other) : Byte() { copy(this, &other); }
+	
+	__host__ __device__
+	Byte & operator=(Byte const & other) { copy(this, &other); }
+	
+	__host__ __device__
+	Byte(Byte && other) : Byte() { copy(this, &other); }
+	
+	__host__ __device__
+	Byte & operator=(Byte && other) { copy(this, &other); }
+
+	~Byte() = default;
+
+};
+
+template <typename T>
+__host__ __device__
+Byte<sizeof(T)> const & bytes_of(T const & value) {
+	return *reinterpret_cast<Byte<sizeof(T)> const *>(&value);
+}
+
+template <typename T>
+__host__ __device__
+Byte<sizeof(T)> & bytes_of(T & value) {
+	return *reinterpret_cast<Byte<sizeof(T)> *>(&value);
+}
+
+using byte		= Byte<1>;
+using byte2		= Byte<2>;
+using byte4		= Byte<4>;
+using byte8		= Byte<8>;
+using byte16	= Byte<16>;
+
+
+
 END_NAMESPACE(spp)
 
 

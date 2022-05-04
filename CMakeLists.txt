@@ -16,6 +16,7 @@ target_include_directories(inclusive_scan
 	PRIVATE ${SPP_INCLUDE_DIR}
 )
 
-set_target_properties(inclusive_scan
-	PROPERTIES CUDA_ARCHITECTURES OFF
+set_target_properties(inclusive_scan PROPERTIES
+	CUDA_ARCHITECTURES OFF
+	CUDA_SEPARABLE_COMPILATION ON
 )
