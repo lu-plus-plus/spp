@@ -5,8 +5,7 @@
 #include <iostream>
 #include <iterator>
 
-#include "thrust/execution_policy.h"
-#include "thrust/scan.h"
+#include "cub/device/device_scan.cuh"
 
 #include "spp/types.hpp"
 #include "spp/log.hpp"
@@ -70,26 +69,54 @@ int main(void) {
 
 
 	$with(spp::event start, stop) {
+
+		void * temp_storage = nullptr;
+		size_t temp_storage_bytes = 0;
+
+		cub::DeviceScan::ExclusiveSum(
+			temp_storage, temp_storage_bytes,
+			d_in_data.get(), d_out_data_truth.get(), total_length
+		);
+
+		cudaCheck(cudaMalloc(&temp_storage, temp_storage_bytes));
+
 		start.record();
 
-		thrust::inclusive_scan(
-			thrust::device,
-			d_in_data.get(), d_in_data.get() + total_length,
-			d_out_data_truth.get()
+		cub::DeviceScan::ExclusiveSum(
+			temp_storage, temp_storage_bytes,
+			d_in_data.get(), d_out_data_truth.get(), total_length
 		);
 
 		stop.record();
 		stop.synchronize();
+
 		std::cout << "ground truth time = " << stop.elapsed_time_from(start) << std::endl;
+
+		cudaCheck(cudaFree(temp_storage));
 	}
 
 	$with(spp::event start, stop) {
+
+		spp::device_ptr<spp::byte> temp_storage = nullptr;
+		spp::u32 temp_storage_bytes = 0;
+
+		cudaCheck(spp::inclusive_scan<data_t>(
+			d_in_data, d_out_data_test, total_length,
+			temp_storage, temp_storage_bytes
+		));
+
+		temp_storage = spp::device_alloc<spp::byte>(temp_storage_bytes);
+
 		start.record();
 
-		cudaCheck(spp::inclusive_scan(total_length, d_in_data.get(), d_out_data_test.get()));
+		cudaCheck(spp::inclusive_scan<data_t>(
+			d_in_data, d_out_data_test, total_length,
+			temp_storage, temp_storage_bytes
+		));
 
 		stop.record();
 		stop.synchronize();
+
 		std::cout << "test time = " << stop.elapsed_time_from(start) << std::endl;
 	}
 

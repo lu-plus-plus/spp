@@ -63,26 +63,43 @@ struct Byte {
 	
 	struct nothing {} paddings[S];
 	
+	template <typename T>
+	struct deref {
+		__host__ __device__
+		T operator()(T const * ptr) const noexcept {
+			return *ptr;
+		}
+	};
+
+	template <typename T>
+	struct ldg {
+		__host__ __device__
+		T operator()(T const * ptr) const noexcept {
+			return __ldg(ptr);
+		}
+	};
+
+	template <template <typename> typename Load = deref>
 	__host__ __device__
 	static void copy(Byte * dst, Byte const * src) {
 		for (u64 i = 0; (i + 1) * 16 <= S; ++i) {
-			reinterpret_cast<int4 *>(dst)[i] = reinterpret_cast<int4 const *>(src)[i];
+			reinterpret_cast<int4 *>(dst)[i] = Load<int4>()(reinterpret_cast<int4 const *>(src) + i);
 		}
 		
 		if constexpr (constexpr u64 i = S / 16 * 2; (i + 1) * 8 <= S) {
-			reinterpret_cast<int2 *>(dst)[i] = reinterpret_cast<int2 const *>(src)[i];
+			reinterpret_cast<int2 *>(dst)[i] = Load<int2>()(reinterpret_cast<int2 const *>(src) + i);
 		}
 		
 		if constexpr (constexpr u64 i = S / 8 * 2; (i + 1) * 4 <= S) {
-			reinterpret_cast<int1 *>(dst)[i] = reinterpret_cast<int1 const *>(src)[i];
+			reinterpret_cast<int1 *>(dst)[i] = Load<int1>()(reinterpret_cast<int1 const *>(src) + i);
 		}
 		
 		if constexpr (constexpr u64 i = S / 4 * 2; (i + 1) * 2 <= S) {
-			reinterpret_cast<short1 *>(dst)[i] = reinterpret_cast<short1 const *>(src)[i];
+			reinterpret_cast<short1 *>(dst)[i] = Load<short1>()(reinterpret_cast<short1 const *>(src) + i);
 		}
 
 		if constexpr (constexpr u64 i = S / 2 * 2; i < S) {
-			reinterpret_cast<char1 *>(dst)[i] = reinterpret_cast<char1 const *>(src)[i];
+			reinterpret_cast<char1 *>(dst)[i] = Load<char1>()(reinterpret_cast<char1 const *>(src) + i);
 		}
 	}
 

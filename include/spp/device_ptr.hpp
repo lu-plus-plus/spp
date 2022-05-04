@@ -16,14 +16,23 @@ namespace spp {
 			T * ptr;
 			u32 ref_count;
 
-			void inc() { ++ref_count; }
-			void dec() { if (--ref_count == 0) cudaCheck(cudaFree(ptr)); }
-
 			details_t(T * ptr) : ptr(ptr), ref_count(1) {}
 
 		};
 
 		details_t * p_details;
+
+		void inc() const {
+			if (p_details) {
+				++(p_details->ref_count);
+			}
+		}
+
+		void dec() const {
+			if (p_details and --(p_details->ref_count) == 0) {
+				cudaCheck(cudaFree(p_details->ptr));
+			}
+		}
 
 	public:
 
@@ -32,14 +41,14 @@ namespace spp {
 		device_ptr(T * ptr) : p_details(new details_t(ptr)) {}
 		
 		device_ptr(device_ptr const & other) : p_details(other.p_details) {
-			other.p_details->inc();
+			other.inc();
 		}
 
 		device_ptr & operator=(device_ptr const & other) {
-			this->p_details->dec();
+			this->dec();
 			this->p_details = other.p_details;
 			
-			other.p_details->inc();
+			other.inc();
 			
 			return *this;
 		}
@@ -49,7 +58,7 @@ namespace spp {
 		}
 
 		device_ptr & operator=(device_ptr && other) {
-			this->p_details->dec();
+			this->dec();
 			this->p_details = other.p_details;
 			
 			other.p_details = nullptr;
@@ -58,7 +67,7 @@ namespace spp {
 		}
 
 		~device_ptr() {
-			this->p_details->dec();
+			this->dec();
 		}
 
 		T * get() const {
