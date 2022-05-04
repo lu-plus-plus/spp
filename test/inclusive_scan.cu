@@ -68,12 +68,12 @@ int main(void) {
 
 
 
-	$with(spp::event start, stop) {
+	with_(spp::event start, stop) {
 
 		void * temp_storage = nullptr;
 		size_t temp_storage_bytes = 0;
 
-		cub::DeviceScan::ExclusiveSum(
+		cub::DeviceScan::InclusiveSum(
 			temp_storage, temp_storage_bytes,
 			d_in_data.get(), d_out_data_truth.get(), total_length
 		);
@@ -82,7 +82,7 @@ int main(void) {
 
 		start.record();
 
-		cub::DeviceScan::ExclusiveSum(
+		cub::DeviceScan::InclusiveSum(
 			temp_storage, temp_storage_bytes,
 			d_in_data.get(), d_out_data_truth.get(), total_length
 		);
@@ -90,12 +90,12 @@ int main(void) {
 		stop.record();
 		stop.synchronize();
 
-		std::cout << "ground truth time = " << stop.elapsed_time_from(start) << std::endl;
+		std::cout << "[cub] baseline time = " << stop.elapsed_time_from(start) << std::endl;
 
 		cudaCheck(cudaFree(temp_storage));
 	}
 
-	$with(spp::event start, stop) {
+	with_(spp::event start, stop) {
 
 		spp::device_ptr<spp::byte> temp_storage = nullptr;
 		spp::u32 temp_storage_bytes = 0;
@@ -117,7 +117,7 @@ int main(void) {
 		stop.record();
 		stop.synchronize();
 
-		std::cout << "test time = " << stop.elapsed_time_from(start) << std::endl;
+		std::cout << "[spp] test time = " << stop.elapsed_time_from(start) << std::endl;
 	}
 
 

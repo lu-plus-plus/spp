@@ -211,8 +211,7 @@ namespace spp {
 			for (u32 i_tilelet = 0; i_tilelet < TILELETS_PER_THREAD; ++i_tilelet) {
 				u32 const tilelet_rank_begin = block_rank_begin + warp_rank_begin + (32 * i_tilelet + warp.thread_rank()) * VALUES_PER_TILELET;
 				
-				using bytes = Byte<sizeof(tilelets[i_tilelet])>;
-				*reinterpret_cast<bytes *>(tilelets[i_tilelet]) = *reinterpret_cast<bytes const *>(values + tilelet_rank_begin);
+				Byte<sizeof(tilelets[i_tilelet])>::copy(tilelets[i_tilelet], values + tilelet_rank_begin);
 			}
 		}
 		else {
@@ -337,8 +336,7 @@ namespace spp {
 			for (u32 i_tilelet = 0; i_tilelet < TILELETS_PER_THREAD; ++i_tilelet) {
 				u32 const tilelet_rank_begin = block_rank_begin + warp_rank_begin + (32 * i_tilelet + warp.thread_rank()) * VALUES_PER_TILELET;
 				
-				using bytes = Byte<sizeof(tilelets[i_tilelet])>;
-				*reinterpret_cast<bytes *>(results + tilelet_rank_begin) = *reinterpret_cast<bytes const *>(tilelets[i_tilelet]);
+				Byte<sizeof(tilelets[i_tilelet])>::copy(results + tilelet_rank_begin, tilelets[i_tilelet]);
 			}
 		}
 		else {
@@ -356,50 +354,6 @@ namespace spp {
 		}
 
 	}
-
-
-
-	// template <typename T, u32 THREADS_PER_BLOCK, u32 TILELETS_PER_THREAD, u32 VALUES_PER_TILELET>
-	// __global__
-	// void kernel_inclusive_scan_entry(u32 length, T const * values, T * results) {
-
-	// 	constexpr u32 VALUES_PER_BLOCK = VALUES_PER_TILELET * TILELETS_PER_THREAD * THREADS_PER_BLOCK;
-
-	// 	cg::thread_block block	= cg::this_thread_block();
-
-	// 	u32 const block_dim			= THREADS_PER_BLOCK;
-	// 	u32 const grid_dim			= ceiled_div(length, VALUES_PER_BLOCK);
-	// 	u32 const size_in_bytes		= sizeof(block_descriptor<T>) * grid_dim;
-
-	// 	block_descriptor<T> volatile * block_desc;
-	// 	u32 * block_finished_count;
-	// 	__shared__ block_descriptor<T> volatile * shared_block_desc;
-
-	// 	if (block.thread_rank() == 0) {
-	// 		block_desc = static_cast<block_descriptor<T> *>(malloc(size_in_bytes));
-	// 		shared_block_desc = block_desc;
-
-	// 		block_finished_count = static_cast<u32 *>(malloc(sizeof(u32)));
-	// 		*block_finished_count = 0;
-	// 	}
-
-	// 	block.sync();
-
-	// 	block_desc = shared_block_desc;
-
-	// 	block_memset(block, block_desc, size_in_bytes, u8(0));
-
-	// 	block.sync();
-
-	// 	if (block.thread_rank() == 0) {
-	// 		kernel_inclusive_scan_look_back<T, THREADS_PER_BLOCK, TILELETS_PER_THREAD, VALUES_PER_TILELET><<<grid_dim, block_dim>>>(length, values, results, block_desc, block_finished_count);
-	// 		cudaError_t e = cudaGetLastError();
-	// 		if (e != cudaSuccess) {
-	// 			printf("error %d\n", int(e));
-	// 		}
-	// 	}
-
-	// }
 
 
 
