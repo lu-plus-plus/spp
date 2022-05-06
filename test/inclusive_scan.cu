@@ -11,7 +11,7 @@
 #include "spp/log.hpp"
 #include "spp/event.hpp"
 #include "spp/device_ptr.hpp"
-#include "spp/reduce.hpp"
+#include "spp/scan.hpp"
 
 
 
@@ -100,7 +100,7 @@ int main(void) {
 		spp::device_ptr<spp::byte> temp_storage = nullptr;
 		spp::u32 temp_storage_bytes = 0;
 
-		cudaCheck(spp::inclusive_scan<data_t>(
+		cudaCheck(spp::kernel::inclusive_scan<data_t>(
 			d_in_data, d_out_data_test, total_length,
 			temp_storage, temp_storage_bytes
 		));
@@ -109,7 +109,7 @@ int main(void) {
 
 		start.record();
 
-		cudaCheck(spp::inclusive_scan<data_t>(
+		cudaCheck(spp::kernel::inclusive_scan<data_t>(
 			d_in_data, d_out_data_test, total_length,
 			temp_storage, temp_storage_bytes
 		));
