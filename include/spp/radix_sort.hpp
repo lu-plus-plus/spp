@@ -345,20 +345,27 @@ namespace spp {
 			shared_grid_exclusive_prefix[radix_bank] = (*p_grid_radix_histogram)[radix_bank];
 		}
 
-		// __shared__ Histogram<u32> shared_warp_ballot_buffers[WarpsPerBlock];
-
-		// Histogram<u32> & this_warp_ballot_buffer = shared_warp_ballot_buffers[warp.meta_group_rank()];
-
 		block.sync();
 
 
 
-		for (usize i_key = 0; i_key < ItemsPerThread; ++i_key) {
+		auto load_key = [&] (usize i_key) {
 			usize const in_rank = block_rank_begin + warp_rank_begin + 32 * i_key + warp.thread_rank();
 			bool const is_active = in_rank < num_keys;
+			if (is_active) {
+				thread_keys[i_key] = keys_in[in_rank];
+				thread_exclusive_prefixes[i_key] = 0;
+			}
+			else {
+				thread_keys[i_key] = ~ 0_u32;
+				thread_exclusive_prefixes[i_key] = ~ 0_u32;
+			}
+		};
 
-			u32 const key = is_active ? keys_in[in_rank] : 0_u32;
-			usize const radix_bank = binning(key);
+		auto scan_thread_prefix = [&] (usize i_key) {
+			bool const is_active = thread_exclusive_prefixes[i_key] != ~ 0_u32;
+
+			usize const radix_bank = binning(thread_keys[i_key]);
 
 			u32 const match_mask = match_any(warp, is_active, radix_bank);
 			u32 const match_count = __popc(match_mask);
@@ -367,13 +374,35 @@ namespace spp {
 			u16 const thread_exclusive_prefix = this_warp_exclusive_prefix[radix_bank] + u16(match_exclusive_prefix);
 			warp.sync();
 
-			thread_keys[i_key] = key;
 			thread_exclusive_prefixes[i_key] = thread_exclusive_prefix;
 
 			if (match_exclusive_prefix + 1 == match_count) {
 				this_warp_exclusive_prefix[radix_bank] += match_count;
 			}
 			warp.sync();
+		};
+
+		usize constexpr ItemsPerLoading = 2;
+		usize constexpr LoadingsPerThread = ItemsPerThread / ItemsPerLoading;
+
+		for (usize i_key = 0; i_key < ItemsPerLoading; ++i_key) {
+			load_key(i_key);
+		}
+
+		for (usize i_loaded = 0; i_loaded < LoadingsPerThread; ++i_loaded) {
+			usize const ii_loading = i_loaded + 1;
+
+			if (ii_loading != LoadingsPerThread) {
+				for (usize j_key = 0; j_key < ItemsPerLoading; ++j_key) {
+					usize const k_load = ii_loading * ItemsPerLoading + j_key;
+					load_key(k_load);
+				}
+			}
+
+			for (usize j_key = 0; j_key < ItemsPerLoading; ++j_key) {
+				usize const k_load = i_loaded * ItemsPerLoading + j_key;
+				scan_thread_prefix(k_load);
+			}
 		}
 
 		block.sync();
