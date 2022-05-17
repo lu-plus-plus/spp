@@ -24,8 +24,29 @@ namespace spp {
 	template <typename T>
 	struct block_descriptor {
 		block_status status;
-		T aggregate;
+		T internal_aggregate;
 		T inclusive_prefix;
+
+		__device__
+		void store_aggregate(T value) volatile noexcept {
+			internal_aggregate = value;
+			__threadfence();
+			status = block_status::aggregated;
+		}
+
+		__device__
+		void store_inclusive_prefix(T value) volatile noexcept {
+			inclusive_prefix = value;
+			__threadfence();
+			status = block_status::prefixed;
+		}
+
+		__device__
+		block_status load_status_spinning() const volatile noexcept {
+			block_status ret;
+			do ret = this->status; while (block_status::invalid == ret);
+			return ret;
+		}
 	};
 
 
@@ -79,24 +100,23 @@ namespace spp {
 		__device__
 		T get_block_exclusive_prefix(block_descriptor<T> volatile * block_desc, T warp_exclusive_prefix, T warp_reduction, u32 block_rank, u32 warp_rank, u32 thread_rank) {
 
+			T block_exclusive_prefix;
 			__shared__ T shared_block_exclusive_prefix;
 
 			barrier<BarrierId, WarpsPerBlock> barrier;
 
 			if (warp_rank == 0) {
-				T block_exclusive_prefix = identity<T>()();
+				block_exclusive_prefix = identity<T>()();
 				
 				if (thread_rank == 0) {
 					for (i32 i_block = block_rank - 1; 0 <= i_block; --i_block) {
-						block_status status;
-						
-						do status = block_desc[i_block].status; while (block_status::invalid == status);
+						block_status status = block_desc[i_block].load_status_spinning();
 						
 						if (block_status::prefixed == status) {
 							block_exclusive_prefix += block_desc[i_block].inclusive_prefix;
 							break;
 						} else {
-							block_exclusive_prefix += block_desc[i_block].aggregate;
+							block_exclusive_prefix += block_desc[i_block].internal_aggregate;
 						}
 					}
 
@@ -105,27 +125,28 @@ namespace spp {
 
 				barrier.arrive();
 
-				return __shfl_sync(0xFFFFFFFF, block_exclusive_prefix, 0);
+				block_exclusive_prefix = __shfl_sync(0xFFFFFFFF, block_exclusive_prefix, 0);
+
+				return block_exclusive_prefix;
 			}
 			else if (warp_rank + 1 != WarpsPerBlock) {
 				barrier.wait();
 
-				return shared_block_exclusive_prefix;
+				block_exclusive_prefix = shared_block_exclusive_prefix;
+
+				return block_exclusive_prefix;
 			}
 			else {
 				if (thread_rank + 1 == 32) {
-					block_desc[block_rank].aggregate = warp_exclusive_prefix + warp_reduction;
-					__threadfence();
-					block_desc[block_rank].status = block_status::aggregated;
+					block_desc[block_rank].store_aggregate(warp_exclusive_prefix + warp_reduction);
 				}
 
 				barrier.wait();
-				T const block_exclusive_prefix = shared_block_exclusive_prefix;
+				
+				block_exclusive_prefix = shared_block_exclusive_prefix;
 
 				if (thread_rank + 1 == 32) {
-					block_desc[block_rank].inclusive_prefix = block_exclusive_prefix + warp_exclusive_prefix + warp_reduction;
-					__threadfence();
-					block_desc[block_rank].status = block_status::prefixed;
+					block_desc[block_rank].store_inclusive_prefix(block_exclusive_prefix + warp_exclusive_prefix + warp_reduction);
 				}
 
 				return block_exclusive_prefix;
@@ -188,77 +209,8 @@ namespace spp {
 
 
 			warp_exclusive_prefix = device::get_warp_exclusive_prefix<T, WARPS_PER_BLOCK, warp_prefix_producer_barrier, warp_prefix_consumer_barrier>(warp_reduction, warp.meta_group_rank(), warp.thread_rank());
+
 			block_exclusive_prefix = device::get_block_exclusive_prefix<T, WARPS_PER_BLOCK, block_prefix_producer_barrier>(block_desc, warp_exclusive_prefix, warp_reduction, grid.block_rank(), warp.meta_group_rank(), warp.thread_rank());
-
-			// if (warp.thread_rank() + 1 == warp.num_threads()) {
-			// 	warp_partial_results[warp.meta_group_rank()] = warp_reduction;
-			// }
-
-			// if (warp.meta_group_rank() == 0) {
-			// 	// the first warp calculates the exclusive prefix of this block
-
-			// 	bar_warp_prefix_produced.arrive();
-
-			// 	if (warp.thread_rank() == 0) {
-			// 		for (i32 i = grid.block_rank() - 1; 0 <= i; --i) {
-			// 			block_status status;
-			// 			do status = block_desc[i].status; while (block_status::invalid == status);
-			// 			if (block_status::prefixed == status) {
-			// 				block_exclusive_prefix += block_desc[i].inclusive_prefix;
-			// 				break;
-			// 			} else {
-			// 				block_exclusive_prefix += block_desc[i].aggregate;
-			// 			}
-			// 		}
-			// 	}
-
-			// 	block_exclusive_prefix = warp.shfl(block_exclusive_prefix, 0);
-
-			// 	if (warp.thread_rank() == 0) {
-			// 		shared_block_exclusive_prefix = block_exclusive_prefix;
-			// 	}
-
-			// 	bar_block_prefix_produced.arrive();
-			// }
-			// else if (warp.meta_group_rank() + 1 != warp.meta_group_size()) {
-			// 	// warps neither first nor last
-
-			// 	bar_warp_prefix_produced.arrive();
-			// 	bar_warp_prefix_consumed.wait();
-			// 	warp_exclusive_prefix = warp_partial_results[warp.meta_group_rank()];
-
-			// 	bar_block_prefix_produced.wait();
-			// 	block_exclusive_prefix = shared_block_exclusive_prefix;
-			// }
-			// else {
-			// 	// the last warp calculates the exclusive prefixes of all warps
-
-			// 	bar_warp_prefix_produced.wait();
-
-			// 	if (warp.thread_rank() < WARPS_PER_BLOCK) {
-			// 		cg::coalesced_group active = cg::coalesced_threads();
-			// 		T const warp_partial_result = warp_partial_results[warp.thread_rank()];
-			// 		warp_partial_results[warp.thread_rank()] = cg::exclusive_scan(active, warp_partial_result);					
-			// 	}
-			// 	warp_exclusive_prefix = warp_partial_results[warp.meta_group_rank()];
-
-			// 	bar_warp_prefix_consumed.arrive();
-
-			// 	if (warp.thread_rank() + 1 == warp.num_threads()) {
-			// 		block_desc[grid.block_rank()].aggregate = warp_exclusive_prefix + warp_reduction;
-			// 		__threadfence();
-			// 		block_desc[grid.block_rank()].status = block_status::aggregated;
-			// 	}
-
-			// 	bar_block_prefix_produced.wait();
-			// 	block_exclusive_prefix = shared_block_exclusive_prefix;
-
-			// 	if (warp.thread_rank() + 1 == warp.num_threads()) {
-			// 		block_desc[grid.block_rank()].inclusive_prefix = block_exclusive_prefix + warp_exclusive_prefix + warp_reduction;
-			// 		__threadfence();
-			// 		block_desc[grid.block_rank()].status = block_status::prefixed;
-			// 	}
-			// }
 
 
 
