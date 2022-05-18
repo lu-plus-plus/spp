@@ -22,41 +22,41 @@ namespace spp {
 
 		template <typename T, u32 WarpsPerBlock, u32 ProducerBarrierId, u32 ConsumerBarrierId>
 		__device__
-		T get_warp_exclusive_prefix(T value, u32 warp_rank, u32 thread_rank) {
+		T scan_warp_exclusive_prefix(T const & value, cg::thread_block_tile<32> const & warp) {
 
 			__shared__ T warp_partial_results[WarpsPerBlock];
 
-			if (thread_rank + 1 == 32) {
-				warp_partial_results[warp_rank] = value;
+			if (warp.thread_rank() + 1 == 32) {
+				warp_partial_results[warp.meta_group_rank()] = value;
 			}
 
 			barrier<ProducerBarrierId, WarpsPerBlock>		producer_barrier;
 			barrier<ConsumerBarrierId, WarpsPerBlock - 1>	consumer_barrier;
 
-			if (warp_rank == 0) {
+			if (warp.meta_group_rank() == 0) {
 				producer_barrier.arrive();
 
 				return identity<T>()();
 			}
-			else if (warp_rank + 1 != WarpsPerBlock) {
+			else if (warp.meta_group_rank() + 1 != WarpsPerBlock) {
 				producer_barrier.arrive();
 				
 				consumer_barrier.wait();
 
-				return warp_partial_results[warp_rank];
+				return warp_partial_results[warp.meta_group_rank()];
 			}
 			else {
 				producer_barrier.wait();
 
-				if (thread_rank < WarpsPerBlock) {
+				if (warp.thread_rank() < WarpsPerBlock) {
 					cg::coalesced_group active = cg::coalesced_threads();
-					T const warp_partial_result = warp_partial_results[thread_rank];
-					warp_partial_results[thread_rank] = cg::exclusive_scan(active, warp_partial_result);					
+					T const warp_partial_result = warp_partial_results[warp.thread_rank()];
+					warp_partial_results[warp.thread_rank()] = cg::exclusive_scan(active, warp_partial_result);					
 				}
 
 				consumer_barrier.arrive();
 
-				return warp_partial_results[warp_rank];
+				return warp_partial_results[warp.meta_group_rank()];
 			}
 
 		}
@@ -65,19 +65,21 @@ namespace spp {
 
 		template <typename T, u32 WarpsPerBlock, u32 BarrierId>
 		__device__
-		T get_block_exclusive_prefix(lookback<T> volatile * block_desc, T warp_exclusive_prefix, T warp_reduction, u32 block_rank, u32 warp_rank, u32 thread_rank) {
+		T scan_block_exclusive_prefix(lookback<T> volatile * block_lookbacks,
+			T const & warp_exclusive_prefix, T const & warp_reduction,
+			cg::grid_group const & grid, cg::thread_block_tile<32> const & warp) {
 
 			T block_exclusive_prefix;
 			__shared__ T shared_block_exclusive_prefix;
 
 			barrier<BarrierId, WarpsPerBlock> barrier;
 
-			if (warp_rank == 0) {
+			if (warp.meta_group_rank() == 0) {
 				block_exclusive_prefix = identity<T>()();
 				
-				if (thread_rank == 0) {
-					for (isize i_block = isize(block_rank) - 1_is; 0 <= i_block; --i_block) {
-						lookback<T> block_lookback = block_desc[i_block].wait_and_load();
+				if (warp.thread_rank() == 0) {
+					for (isize i_block = isize(grid.block_rank()) - 1_is; 0 <= i_block; --i_block) {
+						lookback<T> block_lookback = block_lookbacks[i_block].wait_and_load();
 						
 						block_exclusive_prefix += block_lookback.get();
 
@@ -89,11 +91,11 @@ namespace spp {
 
 				barrier.arrive();
 
-				block_exclusive_prefix = __shfl_sync(0xFFFFFFFF, block_exclusive_prefix, 0);
+				block_exclusive_prefix = warp.shfl(block_exclusive_prefix, 0);
 
 				return block_exclusive_prefix;
 			}
-			else if (warp_rank + 1 != WarpsPerBlock) {
+			else if (warp.meta_group_rank() + 1 != WarpsPerBlock) {
 				barrier.wait();
 
 				block_exclusive_prefix = shared_block_exclusive_prefix;
@@ -101,16 +103,16 @@ namespace spp {
 				return block_exclusive_prefix;
 			}
 			else {
-				if (thread_rank + 1 == 32) {
-					block_desc[block_rank] = lookback<T>::make_aggregate(warp_exclusive_prefix + warp_reduction);
+				if (warp.thread_rank() + 1 == 32) {
+					block_lookbacks[grid.block_rank()] = lookback<T>::make_aggregate(warp_exclusive_prefix + warp_reduction);
 				}
 
 				barrier.wait();
 				
 				block_exclusive_prefix = shared_block_exclusive_prefix;
 
-				if (thread_rank + 1 == 32) {
-					block_desc[block_rank] = lookback<T>::make_prefix(block_exclusive_prefix + warp_exclusive_prefix + warp_reduction);
+				if (warp.thread_rank() + 1 == 32) {
+					block_lookbacks[grid.block_rank()] = lookback<T>::make_prefix(block_exclusive_prefix + warp_exclusive_prefix + warp_reduction);
 				}
 
 				return block_exclusive_prefix;
@@ -124,29 +126,25 @@ namespace spp {
 
 	namespace global {
 
-		template <typename T, u32 THREADS_PER_BLOCK, u32 ITEMS_PER_THREAD>
+		template <typename T, u32 ThreadsPerBlock, u32 ItemsPerThread>
 		__global__
 		void inclusive_scan(T const * values, T * results, u32 length, lookback<T> volatile * block_desc) {
 
-			constexpr u32 ITEMS_PER_BLOCK	= ITEMS_PER_THREAD * THREADS_PER_BLOCK;
-			constexpr u32 ITEMS_PER_WARP	= ITEMS_PER_THREAD * 32;
+			u32 constexpr WARPS_PER_BLOCK	= ThreadsPerBlock / 32;
 
-			auto const grid		= cg::this_grid();
-			auto const block	= cg::this_thread_block();
-			auto const warp		= cg::tiled_partition<32>(block);
+			u32 constexpr ItemsPerBlock	= ItemsPerThread * ThreadsPerBlock;
+			u32 constexpr ItemsPerWarp	= ItemsPerThread * 32;
 
-			u32 const block_rank_begin	= grid.block_rank() * ITEMS_PER_BLOCK;
-			u32 const warp_rank_begin	= warp.meta_group_rank() * ITEMS_PER_WARP;
+			auto const grid				= cg::this_grid();
+			auto const block			= cg::this_thread_block();
+			auto const warp				= cg::tiled_partition<32>(block);
+
+			u32 const block_rank_begin	= grid.block_rank() * ItemsPerBlock;
+			u32 const warp_rank_begin	= warp.meta_group_rank() * ItemsPerWarp;
 
 
 
-			constexpr u32 WARPS_PER_BLOCK	= THREADS_PER_BLOCK / 32;
-
-			u32 constexpr warp_prefix_producer_barrier = 1;
-			u32 constexpr warp_prefix_consumer_barrier = 2;
-			u32 constexpr block_prefix_producer_barrier = 3;
-
-			T items[ITEMS_PER_THREAD];
+			T items[ItemsPerThread];
 
 			__shared__ T warp_partial_results[WARPS_PER_BLOCK];
 			T warp_exclusive_prefix = identity<T>()();
@@ -156,45 +154,7 @@ namespace spp {
 
 
 
-			// u32 constexpr ITEMS_PER_LOADING = 2;
-			// u32 constexpr LOADINGS_PER_THREAD = ITEMS_PER_THREAD / ITEMS_PER_LOADING;
-
-			// auto load_item = [&] (u32 i_item) {
-			// 	items[i_item] = identity<T>()();
-			// 	u32 const item_rank = block_rank_begin + warp_rank_begin + 32 * i_item + warp.thread_rank();
-			// 	if (item_rank < length) {
-			// 		Byte<sizeof(T)>::copy(items + i_item, values + item_rank);
-			// 	}
-			// };
-
-			// auto scan_item = [&] (u32 i_item) {
-			// 	items[i_item] = cg::inclusive_scan(warp, items[i_item]);
-			// 	if (i_item) {
-			// 		items[i_item] += warp.shfl(items[i_item - 1], 32 - 1);
-			// 	}
-			// };
-
-			// for (u32 i_item = 0; i_item < ITEMS_PER_LOADING; ++i_item) {
-			// 	load_item(i_item);
-			// }
-
-			// for (u32 i_loaded = 0; i_loaded < LOADINGS_PER_THREAD; ++i_loaded) {
-			// 	u32 const i_to_load = i_loaded + 1;
-
-			// 	if (i_to_load != LOADINGS_PER_THREAD) {
-			// 		for (u32 j_item = 0; j_item < ITEMS_PER_LOADING; ++j_item) {
-			// 			u32 const k_item_to_load = i_to_load * ITEMS_PER_LOADING + j_item;
-			// 			load_item(k_item_to_load);
-			// 		}
-			// 	}
-
-			// 	for (u32 j_item = 0; j_item < ITEMS_PER_LOADING; ++j_item) {
-			// 		u32 const k_item_loaded = i_loaded * ITEMS_PER_LOADING + j_item;
-			// 		scan_item(k_item_loaded);
-			// 	}
-			// }
-
-			for (u32 i_item = 0; i_item < ITEMS_PER_THREAD; ++i_item) {
+			for (u32 i_item = 0; i_item < ItemsPerThread; ++i_item) {
 				u32 const item_rank = block_rank_begin + warp_rank_begin + 32 * i_item + warp.thread_rank();
 				items[i_item] = identity<T>()();
 				if (item_rank < length) {
@@ -206,17 +166,21 @@ namespace spp {
 				}
 			}
 
-			T const & warp_reduction = items[ITEMS_PER_THREAD - 1];
+			T const & warp_reduction = items[ItemsPerThread - 1];
 
 
 
-			warp_exclusive_prefix = device::get_warp_exclusive_prefix<T, WARPS_PER_BLOCK, warp_prefix_producer_barrier, warp_prefix_consumer_barrier>(warp_reduction, warp.meta_group_rank(), warp.thread_rank());
+			u32 constexpr warp_prefix_producer_barrier = 1;
+			u32 constexpr warp_prefix_consumer_barrier = 2;
+			u32 constexpr block_prefix_producer_barrier = 3;
+			
+			warp_exclusive_prefix = device::scan_warp_exclusive_prefix<T, WARPS_PER_BLOCK, warp_prefix_producer_barrier, warp_prefix_consumer_barrier>(warp_reduction, warp);
 
-			block_exclusive_prefix = device::get_block_exclusive_prefix<T, WARPS_PER_BLOCK, block_prefix_producer_barrier>(block_desc, warp_exclusive_prefix, warp_reduction, grid.block_rank(), warp.meta_group_rank(), warp.thread_rank());
+			block_exclusive_prefix = device::scan_block_exclusive_prefix<T, WARPS_PER_BLOCK, block_prefix_producer_barrier>(block_desc, warp_exclusive_prefix, warp_reduction, grid, warp);
 
 
 
-			for (u32 i_item = 0; i_item < ITEMS_PER_THREAD; ++i_item) {
+			for (u32 i_item = 0; i_item < ItemsPerThread; ++i_item) {
 				items[i_item] += block_exclusive_prefix + warp_exclusive_prefix;
 				
 				u32 const item_rank = block_rank_begin + warp_rank_begin + 32 * i_item + warp.thread_rank();
@@ -231,11 +195,11 @@ namespace spp {
 
 		template <typename T>
 		__global__
-		void init_inclusive_scan(lookback<T> volatile * descriptors, u32 num_descriptors) {
+		void init_inclusive_scan(lookback<T> volatile * block_lookbacks, u32 num_descriptors) {
 			auto const grid = cg::this_grid();
 
 			for (u32 i = grid.thread_rank(); i < num_descriptors; i += grid.num_threads()) {
-				descriptors[i] = lookback<T>::zero();
+				block_lookbacks[i] = lookback<T>::zero();
 			}
 		}
 
