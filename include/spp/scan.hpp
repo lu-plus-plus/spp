@@ -192,6 +192,44 @@ namespace spp {
 
 
 
+			// u32 constexpr ITEMS_PER_LOADING = 2;
+			// u32 constexpr LOADINGS_PER_THREAD = ITEMS_PER_THREAD / ITEMS_PER_LOADING;
+
+			// auto load_item = [&] (u32 i_item) {
+			// 	items[i_item] = identity<T>()();
+			// 	u32 const item_rank = block_rank_begin + warp_rank_begin + 32 * i_item + warp.thread_rank();
+			// 	if (item_rank < length) {
+			// 		Byte<sizeof(T)>::copy(items + i_item, values + item_rank);
+			// 	}
+			// };
+
+			// auto scan_item = [&] (u32 i_item) {
+			// 	items[i_item] = cg::inclusive_scan(warp, items[i_item]);
+			// 	if (i_item) {
+			// 		items[i_item] += warp.shfl(items[i_item - 1], 32 - 1);
+			// 	}
+			// };
+
+			// for (u32 i_item = 0; i_item < ITEMS_PER_LOADING; ++i_item) {
+			// 	load_item(i_item);
+			// }
+
+			// for (u32 i_loaded = 0; i_loaded < LOADINGS_PER_THREAD; ++i_loaded) {
+			// 	u32 const i_to_load = i_loaded + 1;
+
+			// 	if (i_to_load != LOADINGS_PER_THREAD) {
+			// 		for (u32 j_item = 0; j_item < ITEMS_PER_LOADING; ++j_item) {
+			// 			u32 const k_item_to_load = i_to_load * ITEMS_PER_LOADING + j_item;
+			// 			load_item(k_item_to_load);
+			// 		}
+			// 	}
+
+			// 	for (u32 j_item = 0; j_item < ITEMS_PER_LOADING; ++j_item) {
+			// 		u32 const k_item_loaded = i_loaded * ITEMS_PER_LOADING + j_item;
+			// 		scan_item(k_item_loaded);
+			// 	}
+			// }
+
 			for (u32 i_item = 0; i_item < ITEMS_PER_THREAD; ++i_item) {
 				u32 const item_rank = block_rank_begin + warp_rank_begin + 32 * i_item + warp.thread_rank();
 				items[i_item] = identity<T>()();

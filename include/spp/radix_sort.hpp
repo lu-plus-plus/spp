@@ -1,13 +1,20 @@
 #ifndef SPP_RADIX_SORT_HPP
 #define SPP_RADIX_SORT_HPP
 
-#include "scan.hpp"
-
+#include <cooperative_groups.h>
+#include <cooperative_groups/scan.h>
 #include <cooperative_groups/reduce.h>
+
+#include "types.hpp"
+#include "math.hpp"
 
 
 
 namespace spp {
+
+	namespace cg = cooperative_groups;
+
+
 
 	template <typename T, usize S>
 	struct vector {
@@ -371,10 +378,8 @@ namespace spp {
 			u32 const match_count = __popc(match_mask);
 			u32 const match_exclusive_prefix = __popc(match_mask & thread_mask_lt(warp));
 			
-			u16 const thread_exclusive_prefix = this_warp_exclusive_prefix[radix_bank] + u16(match_exclusive_prefix);
+			thread_exclusive_prefixes[i_key] = this_warp_exclusive_prefix[radix_bank] + u16(match_exclusive_prefix);
 			warp.sync();
-
-			thread_exclusive_prefixes[i_key] = thread_exclusive_prefix;
 
 			if (match_exclusive_prefix + 1 == match_count) {
 				this_warp_exclusive_prefix[radix_bank] += match_count;
