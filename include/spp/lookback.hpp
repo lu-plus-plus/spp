@@ -7,10 +7,110 @@
 
 namespace spp {
 
-	template <typename UInt>
+	template <typename T, typename = void>
 	struct lookback {
 
-		static_assert(std::is_unsigned_v<UInt>, "The underlying type of `lookback` must be unsigned.");
+		static_assert(sizeof(T) <= 8, "lookback<T> occupies more than 16 bytes.");
+		static_assert(std::is_trivially_default_constructible_v<T>, "T must be trivially default-constructible.");
+		static_assert(std::is_trivially_copyable_v<T>, "T must be trivally copyable");
+
+	private:
+
+		enum class e_status : u32 {
+			invalid = 0_u32, aggregated = 1_u32, prefixed = 2_u32
+		} status;
+
+		T value;
+
+		constexpr
+		__host__ __device__
+		lookback(e_status status_, T const & value_) noexcept :
+			status(status_), value(value_) {}
+
+	public:
+
+		/* copy / move ctors */
+
+		lookback(lookback const &) noexcept = default;
+
+		lookback(lookback &&) noexcept = default;
+
+		constexpr
+		__host__ __device__
+		lookback(lookback const volatile & rhs) noexcept :
+			status(rhs.status), value(rhs.value) {}
+
+		/* copy / move assignment opeartors */
+
+		lookback & operator=(lookback const &) noexcept = default;
+		
+		lookback & operator=(lookback &&) noexcept = default;
+
+		__host__ __device__
+		lookback & operator=(lookback const volatile & rhs) noexcept {
+			Byte<sizeof(lookback)>::copy(this, &rhs);
+		}
+
+		__host__ __device__
+		lookback volatile & operator=(lookback const & rhs) volatile noexcept {
+			Byte<sizeof(lookback)>::copy(this, &rhs);
+		}
+
+		/* initializers */
+
+		static constexpr
+		__host__ __device__
+		lookback zero() noexcept {
+			return lookback(e_status::invalid, T());
+		}
+
+		static constexpr
+		__host__ __device__
+		lookback make_aggregate(T value) noexcept {
+			return lookback(e_status::aggregated, value);
+		}
+
+		static constexpr
+		__host__ __device__
+		lookback make_prefix(T value) noexcept {
+			return lookback(e_status::prefixed, value);
+		}
+
+		/* getters */
+
+		__host__ __device__
+		bool is_prefixed() const noexcept {
+			return status == e_status::prefixed;
+		}
+
+		__host__ __device__
+		bool is_aggregated() const noexcept {
+			return status == e_status::aggregated;
+		}
+
+		__host__ __device__
+		bool is_invalid() const noexcept {
+			return status == e_status::invalid;
+		}
+
+		__host__ __device__
+		T get() const noexcept {
+			return value;
+		}
+
+		__host__ __device__
+		lookback wait_and_load() const volatile noexcept {
+			lookback result{ *this };
+			while (result.is_invalid()) result = *this;
+			return result;
+		}
+
+	};
+
+
+
+	template <typename UInt>
+	struct lookback<UInt, std::enable_if_t<std::is_unsigned_v<UInt>>> {
 
 	private:
 
