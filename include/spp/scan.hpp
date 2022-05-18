@@ -5,49 +5,16 @@
 #include <cooperative_groups/scan.h>
 
 #include "types.hpp"
+#include "math.hpp"
 #include "barrier.hpp"
 #include "identity.hpp"
-#include "math.hpp"
+#include "lookback.hpp"
 
 
 
 namespace spp {
 
 	namespace cg = ::cooperative_groups;
-
-
-
-	enum struct block_status : u32 {
-		invalid = 0, aggregated = 1, prefixed = 2
-	};
-
-	template <typename T>
-	struct block_descriptor {
-		block_status status;
-		T internal_aggregate;
-		T inclusive_prefix;
-
-		__device__
-		void store_aggregate(T value) volatile noexcept {
-			internal_aggregate = value;
-			__threadfence();
-			status = block_status::aggregated;
-		}
-
-		__device__
-		void store_inclusive_prefix(T value) volatile noexcept {
-			inclusive_prefix = value;
-			__threadfence();
-			status = block_status::prefixed;
-		}
-
-		__device__
-		block_status load_status_spinning() const volatile noexcept {
-			block_status ret;
-			do ret = this->status; while (block_status::invalid == ret);
-			return ret;
-		}
-	};
 
 
 
@@ -98,7 +65,7 @@ namespace spp {
 
 		template <typename T, u32 WarpsPerBlock, u32 BarrierId>
 		__device__
-		T get_block_exclusive_prefix(block_descriptor<T> volatile * block_desc, T warp_exclusive_prefix, T warp_reduction, u32 block_rank, u32 warp_rank, u32 thread_rank) {
+		T get_block_exclusive_prefix(lookback<T> volatile * block_desc, T warp_exclusive_prefix, T warp_reduction, u32 block_rank, u32 warp_rank, u32 thread_rank) {
 
 			T block_exclusive_prefix;
 			__shared__ T shared_block_exclusive_prefix;
@@ -109,15 +76,12 @@ namespace spp {
 				block_exclusive_prefix = identity<T>()();
 				
 				if (thread_rank == 0) {
-					for (i32 i_block = block_rank - 1; 0 <= i_block; --i_block) {
-						block_status status = block_desc[i_block].load_status_spinning();
+					for (isize i_block = isize(block_rank) - 1_is; 0 <= i_block; --i_block) {
+						lookback<T> block_lookback = block_desc[i_block].wait_and_load();
 						
-						if (block_status::prefixed == status) {
-							block_exclusive_prefix += block_desc[i_block].inclusive_prefix;
-							break;
-						} else {
-							block_exclusive_prefix += block_desc[i_block].internal_aggregate;
-						}
+						block_exclusive_prefix += block_lookback.get();
+
+						if (block_lookback.is_prefixed()) break;
 					}
 
 					shared_block_exclusive_prefix = block_exclusive_prefix;
@@ -138,7 +102,7 @@ namespace spp {
 			}
 			else {
 				if (thread_rank + 1 == 32) {
-					block_desc[block_rank].store_aggregate(warp_exclusive_prefix + warp_reduction);
+					block_desc[block_rank] = lookback<T>::make_aggregate(warp_exclusive_prefix + warp_reduction);
 				}
 
 				barrier.wait();
@@ -146,7 +110,7 @@ namespace spp {
 				block_exclusive_prefix = shared_block_exclusive_prefix;
 
 				if (thread_rank + 1 == 32) {
-					block_desc[block_rank].store_inclusive_prefix(block_exclusive_prefix + warp_exclusive_prefix + warp_reduction);
+					block_desc[block_rank] = lookback<T>::make_prefix(block_exclusive_prefix + warp_exclusive_prefix + warp_reduction);
 				}
 
 				return block_exclusive_prefix;
@@ -162,7 +126,7 @@ namespace spp {
 
 		template <typename T, u32 THREADS_PER_BLOCK, u32 ITEMS_PER_THREAD>
 		__global__
-		void inclusive_scan(T const * values, T * results, u32 length, block_descriptor<T> volatile * block_desc) {
+		void inclusive_scan(T const * values, T * results, u32 length, lookback<T> volatile * block_desc) {
 
 			constexpr u32 ITEMS_PER_BLOCK	= ITEMS_PER_THREAD * THREADS_PER_BLOCK;
 			constexpr u32 ITEMS_PER_WARP	= ITEMS_PER_THREAD * 32;
@@ -267,11 +231,11 @@ namespace spp {
 
 		template <typename T>
 		__global__
-		void init_inclusive_scan(block_descriptor<T> volatile * descriptors, u32 num_descriptors) {
+		void init_inclusive_scan(lookback<T> volatile * descriptors, u32 num_descriptors) {
 			auto const grid = cg::this_grid();
 
 			for (u32 i = grid.thread_rank(); i < num_descriptors; i += grid.num_threads()) {
-				descriptors[i].status = block_status::invalid;
+				descriptors[i] = lookback<T>::zero();
 			}
 		}
 
@@ -291,7 +255,7 @@ namespace spp {
 			auto num_blocks = ceiled_div(length, items_per_block);
 
 			if (temp_storage == nullptr || temp_storage_bytes == 0) {
-				temp_storage_bytes = num_blocks * sizeof(block_descriptor<T>);
+				temp_storage_bytes = num_blocks * sizeof(lookback<T>);
 				return cudaSuccess;
 			}
 			else {

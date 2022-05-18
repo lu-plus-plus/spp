@@ -17,7 +17,7 @@
 
 int main(void) {
 	using spp::u32;
-	using data_t = spp::i32;
+	using data_t = spp::u32;
 
 	using index_dist_t = std::uniform_int_distribution<u32>;
 	using data_dist_t = std::uniform_int_distribution<data_t>;
