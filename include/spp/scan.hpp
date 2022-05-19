@@ -6,8 +6,8 @@
 
 #include "types.hpp"
 #include "math.hpp"
+#include "operators.hpp"
 #include "barrier.hpp"
-#include "identity.hpp"
 #include "lookback.hpp"
 
 
@@ -20,9 +20,9 @@ namespace spp {
 
 	namespace device {
 
-		template <typename T, u32 WarpsPerBlock, u32 ProducerBarrierId, u32 ConsumerBarrierId>
+		template <typename T, typename IdentityOp, u32 WarpsPerBlock, u32 ProducerBarrierId, u32 ConsumerBarrierId>
 		__device__
-		T scan_warp_exclusive_prefix(T const & value, cg::thread_block_tile<32> const & warp) {
+		T scan_warp_exclusive_prefix(T const & value, cg::thread_block_tile<32> const & warp, IdentityOp identity_op) {
 
 			__shared__ T warp_partial_results[WarpsPerBlock];
 
@@ -36,7 +36,7 @@ namespace spp {
 			if (warp.meta_group_rank() == 0) {
 				producer_barrier.arrive();
 
-				return identity<T>()();
+				return identity_op();
 			}
 			else if (warp.meta_group_rank() + 1 != WarpsPerBlock) {
 				producer_barrier.arrive();
@@ -63,11 +63,12 @@ namespace spp {
 
 
 
-		template <typename T, u32 WarpsPerBlock, u32 BarrierId>
+		template <typename T, typename IdentityOp, u32 WarpsPerBlock, u32 BarrierId>
 		__device__
 		T scan_block_exclusive_prefix(lookback<T> volatile * block_lookbacks,
 			T const & warp_exclusive_prefix, T const & warp_reduction,
-			cg::grid_group const & grid, cg::thread_block_tile<32> const & warp) {
+			cg::grid_group const & grid, cg::thread_block_tile<32> const & warp,
+			IdentityOp identity_op) {
 
 			T block_exclusive_prefix;
 			__shared__ T shared_block_exclusive_prefix;
@@ -75,7 +76,7 @@ namespace spp {
 			barrier<BarrierId, WarpsPerBlock> barrier;
 
 			if (warp.meta_group_rank() == 0) {
-				block_exclusive_prefix = identity<T>()();
+				block_exclusive_prefix = identity_op();
 				
 				if (warp.thread_rank() == 0) {
 					for (isize i_block = isize(grid.block_rank()) - 1_is; 0 <= i_block; --i_block) {
@@ -124,68 +125,88 @@ namespace spp {
 
 
 
+	namespace op {
+
+		template <typename T>
+		struct inclusive_scan {
+			__device__
+			T operator()(cg::thread_block_tile<32> const & warp, T const & value) const noexcept {
+				return cg::inclusive_scan(warp, value);
+			}
+		};
+
+		template <typename T>
+		struct exclusive_scan {
+			__device__
+			T operator()(cg::thread_block_tile<32> const & warp, T const & value) const noexcept {
+				return cg::exclusive_scan(warp, value);
+			}
+		};
+
+	} // namespace op
+
+
+
 	namespace global {
 
-		template <typename T, u32 ThreadsPerBlock, u32 ItemsPerThread>
+		template <typename ValueTy, typename ResultTy, typename ScanOp, typename IdentityOp, u32 ThreadsPerBlock, u32 ItemsPerThread, bool IsInclusive>
 		__global__
-		void inclusive_scan(T const * values, T * results, u32 length, lookback<T> volatile * block_desc) {
+		void generic_lookback_scan(ValueTy const * values, ResultTy * results, usize size, ScanOp scan_op, IdentityOp identity_op, lookback<ValueTy> volatile * block_lookbacks) {
 
-			u32 constexpr WARPS_PER_BLOCK	= ThreadsPerBlock / 32;
+			auto const grid						= cg::this_grid();
+			auto const block					= cg::this_thread_block();
+			auto const warp						= cg::tiled_partition<32>(block);
 
-			u32 constexpr ItemsPerBlock	= ItemsPerThread * ThreadsPerBlock;
-			u32 constexpr ItemsPerWarp	= ItemsPerThread * 32;
+			usize constexpr WarpsPerBlock		= ThreadsPerBlock / 32;
 
-			auto const grid				= cg::this_grid();
-			auto const block			= cg::this_thread_block();
-			auto const warp				= cg::tiled_partition<32>(block);
+			usize constexpr ItemsPerBlock		= ItemsPerThread * ThreadsPerBlock;
+			usize constexpr ItemsPerWarp		= ItemsPerThread * 32;
 
-			u32 const block_rank_begin	= grid.block_rank() * ItemsPerBlock;
-			u32 const warp_rank_begin	= warp.meta_group_rank() * ItemsPerWarp;
-
-
-
-			T items[ItemsPerThread];
-
-			__shared__ T warp_partial_results[WARPS_PER_BLOCK];
-			T warp_exclusive_prefix = identity<T>()();
-
-			__shared__ T shared_block_exclusive_prefix;
-			T block_exclusive_prefix = identity<T>()();
+			usize const block_rank_begin		= grid.block_rank() * ItemsPerBlock;
+			usize const warp_rank_begin			= warp.meta_group_rank() * ItemsPerWarp;
 
 
 
-			for (u32 i_item = 0; i_item < ItemsPerThread; ++i_item) {
-				u32 const item_rank = block_rank_begin + warp_rank_begin + 32 * i_item + warp.thread_rank();
-				items[i_item] = identity<T>()();
-				if (item_rank < length) {
-					Byte<sizeof(T)>::copy(items + i_item, values + item_rank);
+			ValueTy item_prefixes[ItemsPerThread];
+			ValueTy warp_reduction = identity_op();
+
+			for (usize i_tile = 0; i_tile < ItemsPerThread; ++i_tile) {
+				usize const item_rank = block_rank_begin + warp_rank_begin + 32 * i_tile + warp.thread_rank();
+				
+				ValueTy item = identity_op();
+				if (item_rank < size) {
+					Byte<sizeof(ValueTy)>::copy(&item, values + item_rank);
 				}
-				items[i_item] = cg::inclusive_scan(warp, items[i_item]);
-				if (i_item) {
-					items[i_item] += warp.shfl(items[i_item - 1], 32 - 1);
+
+				ValueTy const tile_prefix = scan_op(warp, item);
+				item_prefixes[i_tile] = warp_reduction + tile_prefix;
+
+				if constexpr (IsInclusive) {
+					warp_reduction += warp.shfl(tile_prefix, 32 - 1);
+				}
+				else {
+					warp_reduction += warp.shfl(tile_prefix + item, 32 - 1);
 				}
 			}
 
-			T const & warp_reduction = items[ItemsPerThread - 1];
 
 
-
-			u32 constexpr warp_prefix_producer_barrier = 1;
-			u32 constexpr warp_prefix_consumer_barrier = 2;
-			u32 constexpr block_prefix_producer_barrier = 3;
+			u32 constexpr WarpPrefixProduced	= 1;
+			u32 constexpr WarpPrefixConsumed	= 2;
+			u32 constexpr BlockPrefixProduced	= 3;
 			
-			warp_exclusive_prefix = device::scan_warp_exclusive_prefix<T, WARPS_PER_BLOCK, warp_prefix_producer_barrier, warp_prefix_consumer_barrier>(warp_reduction, warp);
+			ValueTy const warp_exclusive_prefix = device::scan_warp_exclusive_prefix<ValueTy, IdentityOp, WarpsPerBlock, WarpPrefixProduced, WarpPrefixConsumed>(warp_reduction, warp, identity_op);
 
-			block_exclusive_prefix = device::scan_block_exclusive_prefix<T, WARPS_PER_BLOCK, block_prefix_producer_barrier>(block_desc, warp_exclusive_prefix, warp_reduction, grid, warp);
+			ValueTy const block_exclusive_prefix = device::scan_block_exclusive_prefix<ValueTy, IdentityOp, WarpsPerBlock, BlockPrefixProduced>(block_lookbacks, warp_exclusive_prefix, warp_reduction, grid, warp, identity_op);
 
 
 
-			for (u32 i_item = 0; i_item < ItemsPerThread; ++i_item) {
-				items[i_item] += block_exclusive_prefix + warp_exclusive_prefix;
+			for (usize i_tile = 0; i_tile < ItemsPerThread; ++i_tile) {
+				u32 const item_rank = block_rank_begin + warp_rank_begin + 32 * i_tile + warp.thread_rank();
 				
-				u32 const item_rank = block_rank_begin + warp_rank_begin + 32 * i_item + warp.thread_rank();
-				if (item_rank < length) {
-					Byte<sizeof(T)>::copy(results + item_rank, items + i_item);
+				if (item_rank < size) {
+					ResultTy result = block_exclusive_prefix + warp_exclusive_prefix + item_prefixes[i_tile];
+					Byte<sizeof(ResultTy)>::copy(results + item_rank, &result);
 				}
 			}
 
@@ -195,10 +216,10 @@ namespace spp {
 
 		template <typename T>
 		__global__
-		void init_inclusive_scan(lookback<T> volatile * block_lookbacks, u32 num_descriptors) {
+		void init_inclusive_scan(lookback<T> volatile * block_lookbacks, usize num_blocks) {
 			auto const grid = cg::this_grid();
 
-			for (u32 i = grid.thread_rank(); i < num_descriptors; i += grid.num_threads()) {
+			for (usize i = grid.thread_rank(); i < num_blocks; i += grid.num_threads()) {
 				block_lookbacks[i] = lookback<T>::zero();
 			}
 		}
@@ -209,22 +230,23 @@ namespace spp {
 
 	namespace kernel {
 
-		template <typename T>
-		cudaError_t inclusive_scan(T const * values, T * results, u32 length, void * temp_storage, u32 & temp_storage_bytes) {
-			constexpr u32 threads_per_block = 512;
-			constexpr u32 items_per_thread = 16;
-			
-			constexpr u32 items_per_block = items_per_thread * threads_per_block;
+		template <typename ValueTy, typename ResultTy>
+		cudaError_t inclusive_scan(void * temp_storage, usize & temp_storage_bytes, ValueTy const * values, ResultTy * results, usize size) {
 
-			auto num_blocks = ceiled_div(length, items_per_block);
+			usize constexpr ThreadsPerBlock = 128;
+			usize constexpr ItemsPerThread = 16;
+			
+			usize constexpr ItemsPerBlock = ItemsPerThread * ThreadsPerBlock;
+
+			usize num_blocks = ceiled_div(size, ItemsPerBlock);
 
 			if (temp_storage == nullptr || temp_storage_bytes == 0) {
-				temp_storage_bytes = num_blocks * sizeof(lookback<T>);
+				temp_storage_bytes = num_blocks * sizeof(lookback<ValueTy>);
 				return cudaSuccess;
 			}
 			else {
 				/* init */ {
-					auto fn			= reinterpret_cast<void const *>(global::init_inclusive_scan<T>);
+					auto fn			= reinterpret_cast<void const *>(global::init_inclusive_scan<ValueTy>);
 					auto block_dim	= dim3(128, 1, 1);
 					auto grid_dim	= dim3(ceiled_div(num_blocks, block_dim.x), 1, 1);
 					void * args[]	= { &temp_storage, &num_blocks };
@@ -235,15 +257,22 @@ namespace spp {
 				}
 
 				/* scan */ {
-					auto fn			= reinterpret_cast<void const *>(global::inclusive_scan<T, threads_per_block, items_per_thread>);
-					auto grid_dim	= dim3(num_blocks, 1, 1);
-					auto block_dim	= dim3(threads_per_block, 1, 1);
-					void * args[] = { &values, &results, &length, &temp_storage };
+					using ScanOp		= op::inclusive_scan<ValueTy>;
+					using IdentityOp	= op::identity<ValueTy>;
+
+					auto fn				= reinterpret_cast<void const *>(global::generic_lookback_scan<ValueTy, ResultTy, ScanOp, IdentityOp, ThreadsPerBlock, ItemsPerThread, true>);
+					auto grid_dim		= dim3(num_blocks, 1, 1);
+					auto block_dim		= dim3(ThreadsPerBlock, 1, 1);
+
+					auto scan_op		= ScanOp();
+					auto identity_op	= IdentityOp();
+					void * args[] = { &values, &results, &size, &scan_op, &identity_op, &temp_storage };
 
 					return cudaLaunchKernel(fn, grid_dim, block_dim, args);
 				}
 			}
-		}
+
+		} // inclusive_scan
 
 	} // namespace kernel
 

@@ -71,17 +71,17 @@ int main(void) {
 		spp::device_ptr<spp::byte> d_temp_storage = nullptr;
 		spp::usize d_temp_storage_bytes = 0;
 
-		cudaCheck(spp::kernel::inclusive_scan<data_t>(
-			d_data_in, d_data_out_spp, item_count,
-			d_temp_storage, d_temp_storage_bytes
+		cudaCheck(spp::kernel::inclusive_scan(
+			d_temp_storage, d_temp_storage_bytes,
+			d_data_in.get(), d_data_out_spp.get(), item_count
 		));
 
 		d_temp_storage = spp::device_alloc<spp::byte>(d_temp_storage_bytes);
 
 		start.record();
-		cudaCheck(spp::kernel::inclusive_scan<data_t>(
-			d_data_in, d_data_out_spp, item_count,
-			d_temp_storage, d_temp_storage_bytes
+		cudaCheck(spp::kernel::inclusive_scan(
+			d_temp_storage, d_temp_storage_bytes,
+			d_data_in.get(), d_data_out_spp.get(), item_count
 		));
 		stop.record();
 		stop.synchronize();
