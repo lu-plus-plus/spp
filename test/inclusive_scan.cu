@@ -3,7 +3,7 @@
 #include <random>
 #include <numeric>
 #include <iostream>
-#include <iterator>
+#include <iomanip>
 
 #include "cub/device/device_scan.cuh"
 
@@ -19,6 +19,84 @@ using spp::usize;
 
 using data_t = spp::u32;
 using data_dist_t = std::uniform_int_distribution<data_t>;
+
+
+
+#define spp_test_functor_of(fn) [] (auto && ... args) { return fn(std::forward<decltype(args)>(args)...); }
+
+namespace spp {
+
+	template <typename SizeTy>
+	struct tester {
+
+		spp::device_ptr<void> temp_storage;
+		SizeTy temp_storage_bytes;
+
+		static constexpr
+		SizeTy default_warmup = 3;
+		
+		static constexpr
+		SizeTy default_repeat = 10;
+
+		SizeTy warmup = default_warmup;
+		SizeTy repeat = default_repeat;
+
+		template <typename Fn, typename ... Args>
+		tester(Fn && fn, Args && ... args) : temp_storage(nullptr), temp_storage_bytes(0) {
+			
+			void * ptr = nullptr;
+			SizeTy bytes = 0;
+			
+			cudaCheck(std::forward<Fn>(fn)(ptr, bytes, std::forward<Args>(args)...));
+			cudaCheck(cudaMalloc(&ptr, bytes));
+
+			temp_storage = ptr;
+			temp_storage_bytes = bytes;
+		}
+
+		template <typename Fn, typename ... Args>
+		void run(Fn && fn, Args && ... args) {
+			cudaCheck(std::forward<Fn>(fn)(temp_storage.get(), temp_storage_bytes, std::forward<Args>(args)...));
+		}
+
+		tester & config(SizeTy warmup_ = default_warmup, SizeTy repeat_ = default_repeat) {
+			warmup = warmup_;
+			repeat = repeat_;
+
+			return *this;
+		}
+
+		template <typename Fn, typename ... Args>
+		tester & benchmark(Fn && fn, Args && ... args) {
+			for (SizeTy i = 0; i < warmup; ++i) {
+				run(std::forward<Fn>(fn), std::forward<Args>(args)...);
+			}
+
+			float total_time = 0.0f;
+
+			with_(spp::event start, stop) {
+				for (SizeTy i = 0; i < repeat; ++i) {
+					start.record();
+					
+					run(std::forward<Fn>(fn), std::forward<Args>(args)...);
+					
+					stop.record();
+					stop.synchronize();
+					
+					float const time = stop.elapsed_time_from(start);
+					total_time += time;
+					std::cout << "[repeat " << std::setw(4) << i << "] time = " << time << " ms\n";
+				}
+			}
+
+			std::cout << "[average] time = " << total_time / repeat << " ms\n\n";
+
+			return *this;
+		}
+
+	};
+
+}
 
 
 
@@ -41,55 +119,21 @@ int main(void) {
 	auto d_data_out_cub = spp::device_alloc<data_t>(item_count);
 	auto d_data_out_spp = spp::device_alloc<data_t>(item_count);
 
-	with_(spp::event start, stop) {
+	spp::tester<size_t>(
+		spp_test_functor_of(cub::DeviceScan::InclusiveSum),
+		d_data_in.get(), d_data_out_cub.get(), item_count
+	).benchmark(
+		spp_test_functor_of(cub::DeviceScan::InclusiveSum),
+		d_data_in.get(), d_data_out_cub.get(), item_count
+	);
 
-		void * d_temp_storage = nullptr;
-		size_t d_temp_storage_bytes = 0;
-
-		cudaCheck(cub::DeviceScan::InclusiveSum(
-			d_temp_storage, d_temp_storage_bytes,
-			d_data_in.get(), d_data_out_cub.get(), item_count
-		));
-
-		cudaCheck(cudaMalloc(&d_temp_storage, d_temp_storage_bytes));
-
-		start.record();
-		cudaCheck(cub::DeviceScan::InclusiveSum(
-			d_temp_storage, d_temp_storage_bytes,
-			d_data_in.get(), d_data_out_cub.get(), item_count
-		));
-		stop.record();
-		stop.synchronize();
-
-		std::cout << "[cub] baseline time = " << stop.elapsed_time_from(start) << std::endl;
-
-		cudaCheck(cudaFree(d_temp_storage));
-	}
-
-	with_(spp::event start, stop) {
-
-		spp::device_ptr<spp::byte> d_temp_storage = nullptr;
-		spp::usize d_temp_storage_bytes = 0;
-
-		cudaCheck(spp::kernel::inclusive_scan(
-			d_temp_storage, d_temp_storage_bytes,
-			d_data_in.get(), d_data_out_spp.get(), item_count
-		));
-
-		d_temp_storage = spp::device_alloc<spp::byte>(d_temp_storage_bytes);
-
-		start.record();
-		cudaCheck(spp::kernel::inclusive_scan(
-			d_temp_storage, d_temp_storage_bytes,
-			d_data_in.get(), d_data_out_spp.get(), item_count
-		));
-		stop.record();
-		stop.synchronize();
-
-		std::cout << "[spp] test time = " << stop.elapsed_time_from(start) << std::endl;
-	}
-
-
+	spp::tester<spp::usize>(
+		spp_test_functor_of(spp::kernel::inclusive_scan),
+		d_data_in.get(), d_data_out_spp.get(), item_count
+	).benchmark(
+		spp_test_functor_of(spp::kernel::inclusive_scan),
+		d_data_in.get(), d_data_out_spp.get(), item_count
+	);
 
 	std::vector<data_t> h_data_out_cub(item_count);
 	cudaMemcpy(h_data_out_cub.data(), d_data_out_cub.get(), sizeof(data_t) * item_count, cudaMemcpyDeviceToHost);

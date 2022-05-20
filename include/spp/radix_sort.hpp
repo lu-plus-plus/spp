@@ -445,7 +445,7 @@ namespace spp {
 			usize const d_radix_sort_bytes = ceiled_div(sizeof(details::radix_histogram<lookback<u32>>) * radix_sort_num_blocks, 128) * 128;
 			usize const d_keys_temp_bytes = ceiled_div(sizeof(u32) * num_keys, 128) * 128;
 
-			if (d_temp_storage == nullptr or d_temp_storage_bytes == 0) {
+			if (d_temp_storage == nullptr) {
 				d_temp_storage_bytes = d_histogram_bytes + d_radix_sort_bytes + d_keys_temp_bytes;
 
 				return cudaSuccess;

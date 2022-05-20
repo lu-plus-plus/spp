@@ -240,7 +240,7 @@ namespace spp {
 
 			usize num_blocks = ceiled_div(size, ItemsPerBlock);
 
-			if (temp_storage == nullptr || temp_storage_bytes == 0) {
+			if (temp_storage == nullptr) {
 				temp_storage_bytes = num_blocks * sizeof(lookback<ValueTy>);
 				return cudaSuccess;
 			}
