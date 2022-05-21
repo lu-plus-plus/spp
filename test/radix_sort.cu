@@ -28,7 +28,7 @@ int main(void) {
 	std::vector<u32> h_data_in(item_count);
 	std::generate(h_data_in.begin(), h_data_in.end(), randu);
 
-	spp::device_ptr<u32> d_data_in = spp::device_alloc(h_data_in.data(), h_data_in.data() + item_count);
+	spp::device_ptr<u32> d_data_in = spp::device_copy_from(h_data_in.data(), h_data_in.data() + item_count);
 
 	spp::device_ptr<u32> d_data_out_cub = spp::device_alloc<u32>(item_count);
 	spp::device_ptr<u32> d_data_out_spp = spp::device_alloc<u32>(item_count);

@@ -114,7 +114,7 @@ int main(void) {
 		h_data_in.emplace_back(rand_data());
 	}
 	
-	auto d_data_in = spp::device_alloc<data_t>(h_data_in.data(), h_data_in.data() + item_count);
+	auto d_data_in = spp::device_copy_from(h_data_in.data(), h_data_in.data() + item_count);
 
 	auto d_data_out_cub = spp::device_alloc<data_t>(item_count);
 	auto d_data_out_spp = spp::device_alloc<data_t>(item_count);
