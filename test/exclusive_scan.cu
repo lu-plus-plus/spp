@@ -8,9 +8,6 @@
 #include "cub/device/device_scan.cuh"
 
 #include "spp/types.hpp"
-#include "spp/log.hpp"
-#include "spp/event.hpp"
-#include "spp/device_ptr.hpp"
 #include "spp/device_vector.hpp"
 #include "spp/tester.hpp"
 #include "spp/scan.hpp"
@@ -44,18 +41,18 @@ int main(void) {
 	auto d_data_out_spp = spp::device_vector<data_t>(item_count);
 
 	spp::test::tester<size_t>(
-		spp_test_functor_of(cub::DeviceScan::InclusiveSum),
+		spp_test_functor_of(cub::DeviceScan::ExclusiveSum),
 		d_data_in.data(), d_data_out_cub.data(), item_count
 	).benchmark(
-		spp_test_functor_of(cub::DeviceScan::InclusiveSum),
+		spp_test_functor_of(cub::DeviceScan::ExclusiveSum),
 		d_data_in.data(), d_data_out_cub.data(), item_count
 	);
 
 	spp::test::tester<spp::usize>(
-		spp_test_functor_of(spp::kernel::inclusive_scan),
+		spp_test_functor_of(spp::kernel::exclusive_scan),
 		d_data_in.data(), d_data_out_spp.data(), item_count
 	).benchmark(
-		spp_test_functor_of(spp::kernel::inclusive_scan),
+		spp_test_functor_of(spp::kernel::exclusive_scan),
 		d_data_in.data(), d_data_out_spp.data(), item_count
 	);
 

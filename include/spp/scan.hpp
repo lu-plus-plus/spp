@@ -249,16 +249,17 @@ namespace spp {
 
 	namespace kernel {
 
-		template <typename InputIterator, typename OutputIterator,
+		template <bool IsInclusive,
+			typename InputIterator, typename OutputIterator,
 			typename PrologueType = op::identity_function<>,
 			typename EpilogueType = op::identity_function<>,
-			typename ScanType = op::plus<>,
+			typename BinaryOp = op::plus<>,
 			typename IdentityOp = op::identity_element<decltype(std::declval<PrologueType>()(*std::declval<InputIterator>()))>>
-		cudaError_t inclusive_scan(void * temp_storage, usize & temp_storage_bytes,
+		cudaError_t generic_scan(void * temp_storage, usize & temp_storage_bytes,
 			InputIterator data_in, OutputIterator data_out, usize size,
 			PrologueType prologue = PrologueType(),
 			EpilogueType epilogue = EpilogueType(),
-			ScanType scan = ScanType(),
+			BinaryOp binary_op = BinaryOp(),
 			IdentityOp identity_op = IdentityOp()) {
 
 			using InputType = std::decay_t<decltype(*data_in)>;
@@ -291,19 +292,59 @@ namespace spp {
 					auto fn				= reinterpret_cast<void const *>(global::generic_lookback_scan<
 						InputIterator, OutputIterator,
 						PrologueType, EpilogueType,
-						ScanType, IdentityOp,
-						ThreadsPerBlock, ItemsPerThread, true
+						BinaryOp, IdentityOp,
+						ThreadsPerBlock, ItemsPerThread, IsInclusive
 					>);
 					auto grid_dim		= dim3(scan_num_blocks, 1, 1);
 					auto block_dim		= dim3(ThreadsPerBlock, 1, 1);
 
-					void * args[] = { &data_in, &data_out, &size, &prologue, &epilogue, &scan, &identity_op, &temp_storage };
+					void * args[] = { &data_in, &data_out, &size, &prologue, &epilogue, &binary_op, &identity_op, &temp_storage };
 
 					return cudaLaunchKernel(fn, grid_dim, block_dim, args);
 				}
 			}
 
-		} // inclusive_scan
+		} // generic_scan
+
+		template <typename InputIterator, typename OutputIterator,
+			typename PrologueType = op::identity_function<>,
+			typename EpilogueType = op::identity_function<>,
+			typename BinaryOp = op::plus<>,
+			typename IdentityOp = op::identity_element<decltype(std::declval<PrologueType>()(*std::declval<InputIterator>()))>>
+		cudaError_t inclusive_scan(void * temp_storage, usize & temp_storage_bytes,
+			InputIterator data_in, OutputIterator data_out, usize size,
+			PrologueType prologue = PrologueType(),
+			EpilogueType epilogue = EpilogueType(),
+			BinaryOp binary_op = BinaryOp(),
+			IdentityOp identity_op = IdentityOp()) {
+			
+			return generic_scan<true>(
+				temp_storage, temp_storage_bytes,
+				data_in, data_out, size,
+				prologue, epilogue,
+				binary_op, identity_op
+			);
+		}
+
+		template <typename InputIterator, typename OutputIterator,
+			typename PrologueType = op::identity_function<>,
+			typename EpilogueType = op::identity_function<>,
+			typename BinaryOp = op::plus<>,
+			typename IdentityOp = op::identity_element<decltype(std::declval<PrologueType>()(*std::declval<InputIterator>()))>>
+		cudaError_t exclusive_scan(void * temp_storage, usize & temp_storage_bytes,
+			InputIterator data_in, OutputIterator data_out, usize size,
+			PrologueType prologue = PrologueType(),
+			EpilogueType epilogue = EpilogueType(),
+			BinaryOp binary_op = BinaryOp(),
+			IdentityOp identity_op = IdentityOp()) {
+			
+			return generic_scan<false>(
+				temp_storage, temp_storage_bytes,
+				data_in, data_out, size,
+				prologue, epilogue,
+				binary_op, identity_op
+			);
+		}
 
 	} // namespace kernel
 

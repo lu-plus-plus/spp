@@ -40,7 +40,10 @@ namespace spp {
 		device_vector(std::vector<T> const & host_vector) :
 			m_data(alloc_items(host_vector.capacity())),
 			m_size(host_vector.size()),
-			m_capacity(host_vector.capacity()) {}
+			m_capacity(host_vector.capacity()) {
+
+			cudaCheck(cudaMemcpy(m_data, host_vector.data(), sizeof(T) * m_size, cudaMemcpyHostToDevice));
+		}
 		
 		device_vector(std::size_t size) :
 			m_data(alloc_items(inclusive_next_power_of_2(size))),
@@ -53,7 +56,7 @@ namespace spp {
 			m_capacity(inclusive_next_power_of_2(size)) {
 
 			std::vector<T> host_vector(m_size, init);
-			cudaMemcpy(m_data, host_vector.data(), sizeof(T) * m_size, cudaMemcpyHostToDevice);
+			cudaCheck(cudaMemcpy(m_data, host_vector.data(), sizeof(T) * m_size, cudaMemcpyHostToDevice));
 		}
 
 		~device_vector() {
@@ -74,7 +77,7 @@ namespace spp {
 
 		std::vector<T> to_host() const {
 			std::vector<T> host_vector(m_size);
-			cudaMemcpy(host_vector.data(), m_data, sizeof(T) * m_size, cudaMemcpyDeviceToHost);
+			cudaCheck(cudaMemcpy(host_vector.data(), m_data, sizeof(T) * m_size, cudaMemcpyDeviceToHost));
 			return host_vector;
 		}
 

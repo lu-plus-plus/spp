@@ -1,3 +1,6 @@
 # temporary
-.vscode/
 build/
+tmp/
+
+# IDE
+.vscode/

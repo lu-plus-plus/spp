@@ -25,6 +25,21 @@ set_target_properties(inclusive_scan PROPERTIES
 
 
 
+add_executable(exclusive_scan
+	${SPP_TEST_DIR}/exclusive_scan.cu
+)
+
+target_include_directories(exclusive_scan
+	PRIVATE ${SPP_INCLUDE_DIR}
+)
+
+set_target_properties(exclusive_scan PROPERTIES
+	CUDA_ARCHITECTURES OFF
+	CUDA_SEPARABLE_COMPILATION ON
+)
+
+
+
 add_executable(radix_sort
 	${SPP_TEST_DIR}/radix_sort.cu
 )
