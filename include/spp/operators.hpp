@@ -1,22 +1,53 @@
 #ifndef SPP_IDENTITY_HPP
 #define SPP_IDENTITY_HPP
 
-#include <type_traits>
-
-#include "types.hpp"
-
 
 
 namespace spp::op {
 
-	template <typename T, typename = void>
-	struct identity;
-
 	template <typename T>
-	struct identity<T, std::enable_if_t<std::is_integral_v<T> or std::is_floating_point_v<T>>> {
+	struct identity_element {
 		__host__ __device__
-		T operator()() const noexcept {
+		T operator()() const {
 			return T(0);
+		}
+	};
+
+
+
+	template <typename T = void>
+	struct plus {
+		__host__ __device__
+		T operator()(T const & a, T const & b) const {
+			return a + b;
+		}
+	};
+
+	template <>
+	struct plus<void> {
+		template <typename T>
+		__host__ __device__
+		T operator()(T const & a, T const & b) const {
+			return a + b;
+		}
+	};
+
+
+
+	template <typename T = void>
+	struct identity_function {
+		__host__ __device__
+		T operator()(T const & value) const {
+			return value;
+		}
+	};
+
+	template <>
+	struct identity_function<void> {
+		template <typename T>
+		__host__ __device__
+		T operator()(T const & value) const {
+			return value;
 		}
 	};
 

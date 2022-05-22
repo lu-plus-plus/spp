@@ -1,6 +1,7 @@
 #ifndef SPP_REDUCE_HPP
 #define SPP_REDUCE_HPP
 
+#include <type_traits>
 #include <cooperative_groups.h>
 #include <cooperative_groups/scan.h>
 
@@ -121,37 +122,43 @@ namespace spp {
 
 		}
 
+
+
+		template <typename ValueTy, typename ScanOp>
+		__device__
+		std::decay_t<ValueTy> warp_inclusive_scan(cg::thread_block_tile<32> const & warp, ValueTy && value, ScanOp && scan_op) {
+			return cg::inclusive_scan(warp, std::forward<ValueTy>(value), std::forward<ScanOp>(scan_op));
+		}
+
+		template <typename ValueTy, typename ScanOp>
+		__device__
+		std::decay_t<ValueTy> warp_exclusive_scan(cg::thread_block_tile<32> const & warp, ValueTy && value, ScanOp && scan_op) {
+			return cg::exclusive_scan(warp, std::forward<ValueTy>(value), std::forward<ScanOp>(scan_op));
+		}
+
 	} // namespace device
-
-
-
-	namespace op {
-
-		template <typename T>
-		struct inclusive_scan {
-			__device__
-			T operator()(cg::thread_block_tile<32> const & warp, T const & value) const noexcept {
-				return cg::inclusive_scan(warp, value);
-			}
-		};
-
-		template <typename T>
-		struct exclusive_scan {
-			__device__
-			T operator()(cg::thread_block_tile<32> const & warp, T const & value) const noexcept {
-				return cg::exclusive_scan(warp, value);
-			}
-		};
-
-	} // namespace op
 
 
 
 	namespace global {
 
-		template <typename ValueTy, typename ResultTy, typename ScanOp, typename IdentityOp, u32 ThreadsPerBlock, u32 ItemsPerThread, bool IsInclusive>
+		template <
+			typename InputIterator, typename OutputIterator,
+			typename Prologue, typename Epilogue,
+			typename ScanOp, typename IdentityOp,
+			usize ThreadsPerBlock, usize ItemsPerThread, bool IsInclusive
+		>
 		__global__
-		void generic_lookback_scan(ValueTy const * values, ResultTy * results, usize size, ScanOp scan_op, IdentityOp identity_op, lookback<ValueTy> volatile * block_lookbacks) {
+		void generic_lookback_scan(
+			InputIterator data_in, OutputIterator data_out, usize size,
+			Prologue prologue, Epilogue epilogue,
+			ScanOp scan_op, IdentityOp identity_op,
+			lookback<decltype(prologue(*data_in))> volatile * block_lookbacks
+		) {
+
+			using InputType = std::decay_t<decltype(*data_in)>;
+			using OutputType = std::decay_t<decltype(*data_out)>;
+			using ComputeType = std::decay_t<decltype(prologue(*data_in))>;
 
 			auto const grid						= cg::this_grid();
 			auto const block					= cg::this_thread_block();
@@ -167,24 +174,31 @@ namespace spp {
 
 
 
-			ValueTy item_prefixes[ItemsPerThread];
-			ValueTy warp_reduction = identity_op();
+			ComputeType item_prefixes[ItemsPerThread];
+			ComputeType warp_reduction = identity_op();
 
 			for (usize i_tile = 0; i_tile < ItemsPerThread; ++i_tile) {
 				usize const item_rank = block_rank_begin + warp_rank_begin + 32 * i_tile + warp.thread_rank();
-				
-				ValueTy item = identity_op();
+
+				ComputeType item = identity_op();
 				if (item_rank < size) {
-					Byte<sizeof(ValueTy)>::copy(&item, values + item_rank);
+					// if constexpr (std::is_same_v<InputType, ComputeType>) {
+					// 	Byte<sizeof(ValueTy)>::copy(&item, &data_in[item_rank]);
+					// 	item = prologue(item);
+					// }
+					InputType input;
+					Byte<sizeof(InputType)>::copy(&input, &data_in[item_rank]);
+					item = prologue(input);
 				}
 
-				ValueTy const tile_prefix = scan_op(warp, item);
-				item_prefixes[i_tile] = warp_reduction + tile_prefix;
-
 				if constexpr (IsInclusive) {
+					ComputeType const tile_prefix = device::warp_inclusive_scan(warp, item, scan_op);
+					item_prefixes[i_tile] = warp_reduction + tile_prefix;					
 					warp_reduction += warp.shfl(tile_prefix, 32 - 1);
 				}
 				else {
+					ComputeType const tile_prefix = device::warp_exclusive_scan(warp, item, scan_op);
+					item_prefixes[i_tile] = warp_reduction + tile_prefix;
 					warp_reduction += warp.shfl(tile_prefix + item, 32 - 1);
 				}
 			}
@@ -195,9 +209,9 @@ namespace spp {
 			u32 constexpr WarpPrefixConsumed	= 2;
 			u32 constexpr BlockPrefixProduced	= 3;
 			
-			ValueTy const warp_exclusive_prefix = device::scan_warp_exclusive_prefix<ValueTy, IdentityOp, WarpsPerBlock, WarpPrefixProduced, WarpPrefixConsumed>(warp_reduction, warp, identity_op);
+			ComputeType const warp_exclusive_prefix = device::scan_warp_exclusive_prefix<ComputeType, IdentityOp, WarpsPerBlock, WarpPrefixProduced, WarpPrefixConsumed>(warp_reduction, warp, identity_op);
 
-			ValueTy const block_exclusive_prefix = device::scan_block_exclusive_prefix<ValueTy, IdentityOp, WarpsPerBlock, BlockPrefixProduced>(block_lookbacks, warp_exclusive_prefix, warp_reduction, grid, warp, identity_op);
+			ComputeType const block_exclusive_prefix = device::scan_block_exclusive_prefix<ComputeType, IdentityOp, WarpsPerBlock, BlockPrefixProduced>(block_lookbacks, warp_exclusive_prefix, warp_reduction, grid, warp, identity_op);
 
 
 
@@ -205,8 +219,8 @@ namespace spp {
 				u32 const item_rank = block_rank_begin + warp_rank_begin + 32 * i_tile + warp.thread_rank();
 				
 				if (item_rank < size) {
-					ResultTy result = block_exclusive_prefix + warp_exclusive_prefix + item_prefixes[i_tile];
-					Byte<sizeof(ResultTy)>::copy(results + item_rank, &result);
+					OutputType item = epilogue(block_exclusive_prefix + warp_exclusive_prefix + item_prefixes[i_tile]);
+					Byte<sizeof(OutputType)>::copy(&data_out[item_rank], &item);
 				}
 			}
 
@@ -230,26 +244,42 @@ namespace spp {
 
 	namespace kernel {
 
-		template <typename ValueTy, typename ResultTy>
-		cudaError_t inclusive_scan(void * temp_storage, usize & temp_storage_bytes, ValueTy const * values, ResultTy * results, usize size) {
+		template <
+			typename InputIterator, typename OutputIterator,
+			typename PrologueType = op::identity_function<>,
+			typename EpilogueType = op::identity_function<>,
+			typename ScanType = op::plus<>,
+			typename IdentityElementType = op::identity_element<decltype(std::declval<PrologueType>()(*std::declval<InputIterator>()))>
+		>
+		cudaError_t inclusive_scan(
+			void * temp_storage, usize & temp_storage_bytes,
+			InputIterator data_in, OutputIterator data_out, usize size,
+			PrologueType prologue = PrologueType(),
+			EpilogueType epilogue = EpilogueType(),
+			ScanType scan = ScanType(),
+			IdentityElementType identity_element = IdentityElementType()
+		) {
+
+			using InputType = std::decay_t<decltype(*data_in)>;
+			using OutputType = std::decay_t<decltype(*data_out)>;
+			using ComputeType = std::decay_t<decltype(prologue(*data_in))>;
 
 			usize constexpr ThreadsPerBlock = 128;
 			usize constexpr ItemsPerThread = 16;
-			
 			usize constexpr ItemsPerBlock = ItemsPerThread * ThreadsPerBlock;
 
-			usize num_blocks = ceiled_div(size, ItemsPerBlock);
+			usize scan_num_blocks = ceiled_div(size, ItemsPerBlock);
 
 			if (temp_storage == nullptr) {
-				temp_storage_bytes = num_blocks * sizeof(lookback<ValueTy>);
+				temp_storage_bytes = scan_num_blocks * sizeof(lookback<ComputeType>);
 				return cudaSuccess;
 			}
 			else {
 				/* init */ {
-					auto fn			= reinterpret_cast<void const *>(global::init_inclusive_scan<ValueTy>);
+					auto fn			= reinterpret_cast<void const *>(global::init_inclusive_scan<ComputeType>);
 					auto block_dim	= dim3(128, 1, 1);
-					auto grid_dim	= dim3(ceiled_div(num_blocks, block_dim.x), 1, 1);
-					void * args[]	= { &temp_storage, &num_blocks };
+					auto grid_dim	= dim3(ceiled_div(scan_num_blocks, block_dim.x), 1, 1);
+					void * args[]	= { &temp_storage, &scan_num_blocks };
 					
 					if (auto e = cudaLaunchKernel(fn, grid_dim, block_dim, args); cudaSuccess != e) {
 						return e;
@@ -257,16 +287,16 @@ namespace spp {
 				}
 
 				/* scan */ {
-					using ScanOp		= op::inclusive_scan<ValueTy>;
-					using IdentityOp	= op::identity<ValueTy>;
-
-					auto fn				= reinterpret_cast<void const *>(global::generic_lookback_scan<ValueTy, ResultTy, ScanOp, IdentityOp, ThreadsPerBlock, ItemsPerThread, true>);
-					auto grid_dim		= dim3(num_blocks, 1, 1);
+					auto fn				= reinterpret_cast<void const *>(global::generic_lookback_scan<
+						InputIterator, OutputIterator,
+						PrologueType, EpilogueType,
+						ScanType, IdentityElementType,
+						ThreadsPerBlock, ItemsPerThread, true
+					>);
+					auto grid_dim		= dim3(scan_num_blocks, 1, 1);
 					auto block_dim		= dim3(ThreadsPerBlock, 1, 1);
 
-					auto scan_op		= ScanOp();
-					auto identity_op	= IdentityOp();
-					void * args[] = { &values, &results, &size, &scan_op, &identity_op, &temp_storage };
+					void * args[] = { &data_in, &data_out, &size, &prologue, &epilogue, &scan, &identity_element, &temp_storage };
 
 					return cudaLaunchKernel(fn, grid_dim, block_dim, args);
 				}
