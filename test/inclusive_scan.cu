@@ -11,6 +11,7 @@
 #include "spp/log.hpp"
 #include "spp/event.hpp"
 #include "spp/device_ptr.hpp"
+#include "spp/device_vector.hpp"
 #include "spp/scan.hpp"
 
 
@@ -96,6 +97,29 @@ namespace spp {
 
 	};
 
+
+
+	template <typename T>
+	void compare(std::vector<T> const & ground_truth, std::vector<T> const & test, std::size_t max_print_count = 16) {
+		std::size_t error_count = 0;
+
+		for (std::size_t i = 0; i < std::min(ground_truth.size(), test.size()); ++i) {
+			auto const a = ground_truth[i];
+			auto const b = test[i];
+			if (a != b) {
+				if (error_count++ < max_print_count) {
+					std::cout << "[error] at position (" << i << "), ground truth = " << a << ", test data = " << b << std::endl;
+				}
+			}
+		}
+
+		if (ground_truth.size() != test.size()) {
+			std::cout << "[error] the size of ground truth " << ground_truth.size() << " is not equal to the size of test input " << test.size() << std::endl;
+		}
+		std::cout << "[info] element count = " << std::min(ground_truth.size(), test.size()) << std::endl;
+		std::cout << "[info] error count = " << error_count << std::endl;
+	}
+
 }
 
 
@@ -113,49 +137,32 @@ int main(void) {
 	for (usize i = 0; i < item_count; ++i) {
 		h_data_in.emplace_back(rand_data());
 	}
-	
-	auto d_data_in = spp::device_copy_from(h_data_in.data(), h_data_in.data() + item_count);
 
-	auto d_data_out_cub = spp::device_alloc<data_t>(item_count);
-	auto d_data_out_spp = spp::device_alloc<data_t>(item_count);
+	auto d_data_in = spp::device_vector<data_t>(h_data_in);
+
+	auto d_data_out_cub = spp::device_vector<data_t>(item_count);
+	auto d_data_out_spp = spp::device_vector<data_t>(item_count);
 
 	spp::tester<size_t>(
 		spp_test_functor_of(cub::DeviceScan::InclusiveSum),
-		d_data_in.get(), d_data_out_cub.get(), item_count
+		d_data_in.data(), d_data_out_cub.data(), item_count
 	).benchmark(
 		spp_test_functor_of(cub::DeviceScan::InclusiveSum),
-		d_data_in.get(), d_data_out_cub.get(), item_count
+		d_data_in.data(), d_data_out_cub.data(), item_count
 	);
 
 	spp::tester<spp::usize>(
 		spp_test_functor_of(spp::kernel::inclusive_scan),
-		d_data_in.get(), d_data_out_spp.get(), item_count
+		d_data_in.data(), d_data_out_spp.data(), item_count
 	).benchmark(
 		spp_test_functor_of(spp::kernel::inclusive_scan),
-		d_data_in.get(), d_data_out_spp.get(), item_count
+		d_data_in.data(), d_data_out_spp.data(), item_count
 	);
 
-	std::vector<data_t> h_data_out_cub(item_count);
-	cudaMemcpy(h_data_out_cub.data(), d_data_out_cub.get(), sizeof(data_t) * item_count, cudaMemcpyDeviceToHost);
+	auto h_data_out_cub = d_data_out_cub.to_host();
+	auto h_data_out_spp = d_data_out_spp.to_host();
 
-	std::vector<data_t> h_data_out_spp(item_count);
-	cudaMemcpy(h_data_out_spp.data(), d_data_out_spp.get(), sizeof(data_t) * item_count, cudaMemcpyDeviceToHost);
-
-	usize error_count = 0;
-
-	for (usize i = 0; i < item_count; ++i) {
-		data_t const truth = h_data_out_cub[i];
-		data_t const test = h_data_out_spp[i];
-		if (truth != test) {
-			if (error_count == 0) std::cout << "element " << i << ": ground truth = " << truth << ", test = " << test << std::endl;
-			++error_count;
-		}
-	}
-
-	std::cout << "total length = " << item_count << std::endl;
-	std::cout << "error count = " << error_count << std::endl;
-
-
+	spp::compare(h_data_out_cub, h_data_out_spp);
 
 	return 0;
 }
