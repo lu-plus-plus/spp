@@ -5,6 +5,7 @@
 #include <cooperative_groups/scan.h>
 #include <cooperative_groups/reduce.h>
 
+#include "log.hpp"
 #include "types.hpp"
 #include "math.hpp"
 #include "lookback.hpp"
