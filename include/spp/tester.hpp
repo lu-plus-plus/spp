@@ -1,6 +1,9 @@
 #ifndef SPP_TEST_TESTER_HPP
 #define SPP_TEST_TESTER_HPP
 
+#include <iostream>
+#include <iomanip>
+
 #include "log.hpp"
 #include "event.hpp"
 #include "device_ptr.hpp"
@@ -28,7 +31,6 @@ namespace spp::test {
 
 		template <typename Fn, typename ... Args>
 		tester(Fn && fn, Args && ... args) : temp_storage(nullptr), temp_storage_bytes(0) {
-			
 			void * ptr = nullptr;
 			SizeTy bytes = 0;
 			
@@ -41,7 +43,8 @@ namespace spp::test {
 
 		template <typename Fn, typename ... Args>
 		void run(Fn && fn, Args && ... args) {
-			cudaCheck(std::forward<Fn>(fn)(temp_storage.get(), temp_storage_bytes, std::forward<Args>(args)...));
+			void * ptr = temp_storage.get();
+			cudaCheck(std::forward<Fn>(fn)(ptr, temp_storage_bytes, std::forward<Args>(args)...));
 		}
 
 		tester & config(SizeTy warmup_ = default_warmup, SizeTy repeat_ = default_repeat) {
@@ -84,7 +87,7 @@ namespace spp::test {
 
 
 	template <typename T>
-	void compare(std::vector<T> const & ground_truth, std::vector<T> const & test, std::size_t max_print_count = 16) {
+	bool compare(std::vector<T> const & ground_truth, std::vector<T> const & test, std::size_t max_print_count = 16) {
 		std::size_t error_count = 0;
 
 		for (std::size_t i = 0; i < std::min(ground_truth.size(), test.size()); ++i) {
@@ -102,6 +105,8 @@ namespace spp::test {
 		}
 		std::cout << "[info] element count = " << std::min(ground_truth.size(), test.size()) << std::endl;
 		std::cout << "[info] error count = " << error_count << std::endl;
+
+		return error_count == 0;
 	}
 
 }

@@ -10,45 +10,26 @@ set(SPP_TEST_DIR			${PROJECT_SOURCE_DIR}/test)
 
 
 
-add_executable(inclusive_scan
-	${SPP_TEST_DIR}/inclusive_scan.cu
-)
+function(single_file_test filename_wo_ext)
+	add_executable(${filename_wo_ext}
+		${SPP_TEST_DIR}/${filename_wo_ext}.cu
+	)
 
-target_include_directories(inclusive_scan
-	PRIVATE ${SPP_INCLUDE_DIR}
-)
+	target_include_directories(${filename_wo_ext}
+		PRIVATE ${SPP_INCLUDE_DIR}
+	)
 
-set_target_properties(inclusive_scan PROPERTIES
-	CUDA_ARCHITECTURES OFF
-	CUDA_SEPARABLE_COMPILATION ON
-)
-
-
-
-add_executable(exclusive_scan
-	${SPP_TEST_DIR}/exclusive_scan.cu
-)
-
-target_include_directories(exclusive_scan
-	PRIVATE ${SPP_INCLUDE_DIR}
-)
-
-set_target_properties(exclusive_scan PROPERTIES
-	CUDA_ARCHITECTURES OFF
-	CUDA_SEPARABLE_COMPILATION ON
-)
+	set_target_properties(${filename_wo_ext} PROPERTIES
+		CUDA_ARCHITECTURES OFF
+		CUDA_SEPARABLE_COMPILATION ON
+	)
+endfunction()
 
 
 
-add_executable(radix_sort
-	${SPP_TEST_DIR}/radix_sort.cu
-)
+single_file_test(inclusive_scan)
+single_file_test(exclusive_scan)
+single_file_test(radix_sort)
+single_file_test(reduce)
 
-target_include_directories(radix_sort
-	PRIVATE ${SPP_INCLUDE_DIR}
-)
 
-set_target_properties(radix_sort PROPERTIES
-	CUDA_ARCHITECTURES OFF
-	CUDA_SEPARABLE_COMPILATION ON
-)
