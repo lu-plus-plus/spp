@@ -9,47 +9,16 @@
 
 #include "log.hpp"
 #include "math.hpp"
+#include "traits.hpp"
 #include "operators.hpp"
+#include "pipelined_for.hpp"
+#include "kernel_launch.hpp"
 
 
 
 namespace spp {
 
 	namespace cg = cooperative_groups;
-
-	template <typename T>
-	using dereference_t = decltype(*std::declval<T>());
-
-	template <typename Fn, typename ... Args>
-	using apply_t = decltype(std::declval<Fn>()(std::declval<Args>()...));
-
-
-
-	namespace device {
-
-		template <uint32_t Size, uint32_t Step, typename Load, typename Process>
-		__device__
-		void pipelined_for(Load && load, Process && process) {
-			uint32_t constexpr Iterations = Size / Step;
-
-			for (uint32_t i_load = 0; i_load < Step; ++i_load) {
-				std::forward<Load>(load)(i_load);
-			}
-
-			for (uint32_t i_iter = 0; i_iter < Iterations; ++i_iter) {
-				if (i_iter + 1 != Iterations) {
-					for (uint32_t j_load = (i_iter + 1) * Step; j_load < (i_iter + 2) * Step; ++j_load) {
-						std::forward<Load>(load)(j_load);
-					}
-				}
-
-				for (uint32_t j_process = i_iter * Step; j_process < (i_iter + 1) * Step; ++j_process) {
-					std::forward<Process>(process)(j_process);
-				}
-			}
-		}
-
-	}
 
 
 
@@ -134,32 +103,6 @@ namespace spp {
 
 
 	namespace kernel {
-
-		inline
-		uint32_t get_max_active_blocks(void const * fn, int numThreads) {
-			cudaDeviceProp deviceProp;
-			cudaGetDeviceProperties(&deviceProp, 0);
-
-			int numBlocksPerSm = 0;
-			cudaCheck(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&numBlocksPerSm, fn, numThreads, 0));
-
-			return uint32_t(numBlocksPerSm * deviceProp.multiProcessorCount);
-		}
-
-		template <typename ... Args>
-		struct addresses_of {
-
-			void * ptr_to_args[sizeof...(Args)];
-
-			addresses_of(Args & ... args) : ptr_to_args{ (&args)... } {}
-
-			void * * get() {
-				return ptr_to_args;
-			}
-
-		};
-
-
 
 		template <typename InputIterator, typename OutputIterator,
 			typename Binary = op::plus<>,
