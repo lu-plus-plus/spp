@@ -54,8 +54,7 @@ namespace spp {
 	namespace kernel {
 
 		template <typename InputIterator, typename OutputIterator, typename UnaryOp>
-		__global__
-		void transform(InputIterator data_in, OutputIterator data_out, uint32_t size, UnaryOp unary_op) {
+		cudaError_t transform(InputIterator data_in, OutputIterator data_out, uint32_t size, UnaryOp unary_op) {
 
 			uint32_t constexpr ThreadsPerBlock = 128;
 			uint32_t constexpr ItemsPerThread = 4;
