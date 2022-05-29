@@ -41,7 +41,7 @@ namespace spp {
 			for (uint32_t i_item = 0; i_item < ItemsPerThread; ++i_item) {
 				uint32_t const item_rank = item_rank_begin + item_rank_step * i_item;
 				if (item_rank < size) {
-					*(data_out + item_rank) = unary_op(items[item_rank]);
+					*(data_out + item_rank) = unary_op(items[i_item]);
 				}
 			}
 
