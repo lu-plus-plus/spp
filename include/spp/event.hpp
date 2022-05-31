@@ -2,7 +2,7 @@
 #define SPP_EVENT_HPP
 
 #include "types.hpp"
-#include "log.hpp"
+#include "kernel_launch.hpp"
 
 
 

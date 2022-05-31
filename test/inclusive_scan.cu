@@ -8,7 +8,6 @@
 #include "cub/device/device_scan.cuh"
 
 #include "spp/types.hpp"
-#include "spp/log.hpp"
 #include "spp/event.hpp"
 #include "spp/device_ptr.hpp"
 #include "spp/device_vector.hpp"

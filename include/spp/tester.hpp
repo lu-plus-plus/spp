@@ -4,7 +4,6 @@
 #include <iostream>
 #include <iomanip>
 
-#include "log.hpp"
 #include "event.hpp"
 #include "device_ptr.hpp"
 

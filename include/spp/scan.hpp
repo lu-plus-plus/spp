@@ -6,7 +6,6 @@
 #include <cooperative_groups/scan.h>
 
 #include "types.hpp"
-#include "math.hpp"
 #include "operators.hpp"
 #include "barrier.hpp"
 #include "lookback.hpp"

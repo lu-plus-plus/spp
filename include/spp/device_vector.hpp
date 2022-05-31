@@ -3,7 +3,7 @@
 
 #include <vector>
 
-#include "log.hpp"
+#include "kernel_launch.hpp"
 
 
 

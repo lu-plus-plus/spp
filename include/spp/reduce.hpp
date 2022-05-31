@@ -7,8 +7,6 @@
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
 
-#include "log.hpp"
-#include "math.hpp"
 #include "traits.hpp"
 #include "operators.hpp"
 #include "pipelined_for.hpp"
@@ -119,7 +117,7 @@ namespace spp {
 
 			auto fn{ reinterpret_cast<void const *>(global::reduce<ThreadsPerBlock, ItemsPerThread, InputIterator, OutputIterator, Binary, Identity, Epilogue>) };
 
-			uint32_t const max_active_blocks{ get_max_active_blocks(fn, ThreadsPerBlock) };
+			uint32_t const max_active_blocks{ max_active_blocks_for(fn, ThreadsPerBlock) };
 			uint32_t const d_required_bytes{ ceiled_div(sizeof(ResultType) * max_active_blocks, 128) };
 
 			if (d_temp_storage == nullptr) {

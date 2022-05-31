@@ -1,7 +1,7 @@
 #ifndef SPP_DEVICE_PTR_HPP
 #define SPP_DEVICE_PTR_HPP
 
-#include "log.hpp"
+#include "kernel_launch.hpp"
 
 
 

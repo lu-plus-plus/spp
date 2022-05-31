@@ -4,7 +4,6 @@
 #include <cstdint>
 #include <cooperative_groups.h>
 
-#include "math.hpp"
 #include "traits.hpp"
 #include "pipelined_for.hpp"
 #include "kernel_launch.hpp"

@@ -5,10 +5,9 @@
 #include <cooperative_groups/scan.h>
 #include <cooperative_groups/reduce.h>
 
-#include "log.hpp"
-#include "math.hpp"
 #include "types.hpp"
 #include "lookback.hpp"
+#include "kernel_launch.hpp"
 
 
 
@@ -21,16 +20,17 @@ namespace spp {
 	template <typename T, usize S>
 	struct vector {
 
-		// static_assert(std::is_trivially_default_constructible_v<T>, "T must be trivially default-constructible.");
-		// static_assert(std::is_trivially_copy_constructible_v<T>, "T must be trivially copy-constructible.");
-		// static_assert(std::is_trivially_move_constructible_v<T>, "T must be trivially move-constructible.");
+		static_assert(std::is_trivial_v<T>, "T must be a trivial type.");
 
 		// properties
 
 		using element_type = T;
 
 		static constexpr
-		usize size = S;
+		__host__ __device__
+		usize size() {
+			return S;
+		}
 
 		// members and ctor / dtor
 
@@ -80,57 +80,6 @@ namespace spp {
 			return data + idx;
 		}
 
-		// __host__ __device__
-		// vector & operator+=(vector const & other) noexcept {
-		// 	for (usize i = 0; i < S; ++i) {
-		// 		data[i] += other.data[i];
-		// 	}
-		// }
-
-		// __host__ __device__
-		// vector volatile & operator+=(vector const & other) volatile noexcept {
-		// 	for (usize i = 0; i < S; ++i) {
-		// 		data[i] += other.data[i];
-		// 	}
-		// }
-
-		// template <typename T, usize S>
-		// __host__ __device__
-		// friend vector<T, S> operator+(vector<T, S> const & a, vector<T, S> const & b) noexcept {
-		// 	return vector(a) += b;
-		// }
-		
-		template <usize TileSize, typename = std::enable_if_t<S == TileSize>>
-		__host__ __device__
-		static
-		T bind(cg::thread_block_tile<TileSize> const & tile) noexcept {
-			return T();
-		}
-
-		template <usize TileSize, typename = std::enable_if_t<S == TileSize>>
-		__host__ __device__
-		T & bind(cg::thread_block_tile<TileSize> const & tile) noexcept {
-			return (*this)[tile.thread_rank()];
-		}
-
-		template <usize TileSize, typename = std::enable_if_t<S == TileSize>>
-		__host__ __device__
-		T const & bind(cg::thread_block_tile<TileSize> const & tile) const noexcept {
-			return (*this)[tile.thread_rank()];
-		}
-
-		template <usize TileSize, typename = std::enable_if_t<S == TileSize>>
-		__host__ __device__
-		T volatile & bind(cg::thread_block_tile<TileSize> const & tile) volatile noexcept {
-			return (*this)[tile.thread_rank()];
-		}
-
-		template <usize TileSize, typename = std::enable_if_t<S == TileSize>>
-		__host__ __device__
-		T const volatile & bind(cg::thread_block_tile<TileSize> const & tile) const volatile noexcept {
-			return (*this)[tile.thread_rank()];
-		}
-
 	};
 
 
@@ -156,13 +105,13 @@ namespace spp {
 
 		Histogram & grid_histogram = *p_grid_histogram;
 
-		for (usize bin_rank = grid.thread_rank(); bin_rank < Histogram::size; bin_rank += grid.num_threads()) {
+		for (usize bin_rank = grid.thread_rank(); bin_rank < Histogram::size(); bin_rank += grid.num_threads()) {
 			grid_histogram[bin_rank] = 0;
 		}
 
 		__shared__ Histogram block_histogram;
 
-		for (usize bin_rank = block.thread_rank(); bin_rank < Histogram::size; bin_rank += block.num_threads()) {
+		for (usize bin_rank = block.thread_rank(); bin_rank < Histogram::size(); bin_rank += block.num_threads()) {
 			block_histogram[bin_rank] = 0;
 		}
 
@@ -195,7 +144,7 @@ namespace spp {
 
 		block.sync();
 
-		for (usize bin_rank = block.thread_rank(); bin_rank < Histogram::size; bin_rank += block.num_threads()) {
+		for (usize bin_rank = block.thread_rank(); bin_rank < Histogram::size(); bin_rank += block.num_threads()) {
 			atomicAdd(&(grid_histogram[bin_rank]), block_histogram[bin_rank]);
 		}
 
@@ -204,7 +153,7 @@ namespace spp {
 		if (grid.block_rank() == 0 and warp.meta_group_rank() == 0) {
 			usize partial_result = 0_us;
 			
-			for (usize i = 0; i < Histogram::size / 32; ++i) {
+			for (usize i = 0; i < Histogram::size() / 32; ++i) {
 				usize const bin_rank = i * 32 + warp.thread_rank();
 				usize const bin_value = grid_histogram[bin_rank];
 				
@@ -232,7 +181,7 @@ namespace spp {
 
 	template <usize ItemsPerThread, usize ThreadsPerBlock, template <typename> typename Histogram, typename Binning, typename MatchAny>
 	__global__
-	void radix_scan_by_key_with_large_block(u32 const * keys_in, u32 * keys_out, usize num_keys,
+	void radix_scan_by_key_with_large_block(u32 const * keys_in, u32 * keys_out, usize size,
 		Histogram<lookback<u32>> volatile * block_radix_histograms,
 		Histogram<u32> const * p_grid_radix_histogram,
 		Binning binning, MatchAny match_any) {
@@ -241,7 +190,7 @@ namespace spp {
 		usize constexpr ItemsPerWarp	= ItemsPerThread * 32;
 		usize constexpr ItemsPerBlock	= ItemsPerThread * ThreadsPerBlock;
 
-		usize constexpr HistogramSize	= Histogram<u32>::size;
+		usize constexpr HistogramSize	= Histogram<u32>::size();
 
 		auto const grid					= cg::this_grid();
 		auto const block				= cg::this_thread_block();
@@ -276,7 +225,7 @@ namespace spp {
 
 		auto load_key = [&] (usize i_key) {
 			usize const in_rank = block_rank_begin + warp_rank_begin + 32 * i_key + warp.thread_rank();
-			bool const is_active = in_rank < num_keys;
+			bool const is_active = in_rank < size;
 			if (is_active) {
 				thread_keys[i_key] = keys_in[in_rank];
 				thread_exclusive_prefixes[i_key] = 0;
@@ -367,7 +316,7 @@ namespace spp {
 		for (usize i_key = 0; i_key < ItemsPerThread; ++i_key) {
 			usize const in_rank = block_rank_begin + warp_rank_begin + 32 * i_key + warp.thread_rank();
 
-			if (in_rank < num_keys) {
+			if (in_rank < size) {
 				usize const radix_bank = binning(thread_keys[i_key]);
 
 				usize const out_rank = shared_grid_exclusive_prefix[radix_bank]
@@ -434,18 +383,18 @@ namespace spp {
 	namespace kernel {
 
 		inline
-		cudaError_t radix_sort_by_key(u32 const * keys_in, u32 * keys_out, usize num_keys,
-			void * d_temp_storage, usize & d_temp_storage_bytes) {
+		cudaError_t radix_sort(void * d_temp_storage, usize & d_temp_storage_bytes,
+			u32 const * keys_in, u32 * keys_out, usize size) {
 			
 			usize constexpr items_per_thread = 16;
 			usize constexpr threads_per_block = 1 << details::radix_lane_bits;
 			usize constexpr items_per_block = items_per_thread * threads_per_block;
 			
-			usize const radix_sort_num_blocks = ceiled_div(num_keys, items_per_block);
+			usize const radix_sort_num_blocks = ceiled_div(size, items_per_block);
 
 			usize const d_histogram_bytes = ceiled_div(sizeof(details::radix_histogram<u32>), 128) * 128;
 			usize const d_radix_sort_bytes = ceiled_div(sizeof(details::radix_histogram<lookback<u32>>) * radix_sort_num_blocks, 128) * 128;
-			usize const d_keys_temp_bytes = ceiled_div(sizeof(u32) * num_keys, 128) * 128;
+			usize const d_keys_temp_bytes = ceiled_div(sizeof(u32) * size, 128) * 128;
 
 			if (d_temp_storage == nullptr) {
 				d_temp_storage_bytes = d_histogram_bytes + d_radix_sort_bytes + d_keys_temp_bytes;
@@ -482,7 +431,7 @@ namespace spp {
 
 						auto grid_dim	= dim3(histogram_grid_blocks);
 						auto block_dim	= dim3(histogram_block_threads);
-						void * args[]	= { keys_ins[i_pass], &num_keys, &p_grid_radix_histogram, &binning };
+						void * args[]	= { keys_ins[i_pass], &size, &p_grid_radix_histogram, &binning };
 
 						auto result = cudaLaunchCooperativeKernel(fn_histogram, grid_dim, block_dim, args);
 						if (cudaSuccess != result) return result;
@@ -507,7 +456,7 @@ namespace spp {
 
 						auto grid_dim	= dim3(radix_sort_num_blocks);
 						auto block_dim	= dim3(radix_pass_threads_per_block);
-						void * args[]	= { keys_ins[i_pass], keys_outs[i_pass], &num_keys, &block_radix_histograms, &p_grid_radix_histogram, &binning, &match_any };
+						void * args[]	= { keys_ins[i_pass], keys_outs[i_pass], &size, &block_radix_histograms, &p_grid_radix_histogram, &binning, &match_any };
 
 						auto result = cudaLaunchKernel(fn_radix_pass, grid_dim, block_dim, args);
 						if (cudaSuccess != result) return result;
