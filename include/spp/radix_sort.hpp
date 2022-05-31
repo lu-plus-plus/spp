@@ -6,8 +6,8 @@
 #include <cooperative_groups/reduce.h>
 
 #include "log.hpp"
-#include "types.hpp"
 #include "math.hpp"
+#include "types.hpp"
 #include "lookback.hpp"
 
 
@@ -225,7 +225,7 @@ namespace spp {
 	void init_block_radix_histograms(Histogram<lookback<u32>> * block_radix_histograms) {
 		auto const grid		= cg::this_grid();
 		auto const block	= cg::this_thread_block();
-		block_radix_histograms[grid.block_rank()][block.thread_rank()] = lookback<u32>::zero();
+		block_radix_histograms[grid.block_rank()][block.thread_rank()].store_invalid();
 	}
 
 
@@ -283,7 +283,7 @@ namespace spp {
 			}
 			else {
 				thread_keys[i_key] = ~ 0_u32;
-				thread_exclusive_prefixes[i_key] = ~ 0_u32;
+				thread_exclusive_prefixes[i_key] = ~ 0_u16;
 			}
 		};
 
@@ -343,20 +343,21 @@ namespace spp {
 				block_reduction += warp_reduction;
 			}
 
-			block_radix_histograms[grid.block_rank()][radix_bank] = lookback<u32>::make_aggregate(block_reduction);
+			block_radix_histograms[grid.block_rank()][radix_bank].store_aggregate(block_reduction);
 
 			auto block_exclusive_prefix = 0_u32;
 
 			for (isize i_block = isize(grid.block_rank()) - 1_is; 0 <= i_block; --i_block) {
-				lookback<u32> block_lookback = block_radix_histograms[i_block][radix_bank].wait_and_load();
+				bool is_prefixed;
+				u32 const block_lookback = block_radix_histograms[i_block][radix_bank].spin_and_load(is_prefixed);
 
-				block_exclusive_prefix += block_lookback.get();
-				if (block_lookback.is_prefixed()) break;
+				block_exclusive_prefix += block_lookback;
+				if (is_prefixed) break;
 			}
 
 			shared_block_exclusive_prefixes[radix_bank] = block_exclusive_prefix;
 
-			block_radix_histograms[grid.block_rank()][radix_bank] = lookback<u32>::make_prefix(block_exclusive_prefix + block_reduction);
+			block_radix_histograms[grid.block_rank()][radix_bank].store_prefix(block_exclusive_prefix + block_reduction);
 		}
 
 		block.sync();

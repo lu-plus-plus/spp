@@ -79,16 +79,17 @@ namespace spp {
 
 			barrier<BarrierId, WarpsPerBlock> barrier;
 
-			if (warp.meta_group_rank() == 0) {
-				block_exclusive_prefix = std::forward<IdentityOp>(identity_op)();
-				
+			if (warp.meta_group_rank() == 0) {				
 				if (warp.thread_rank() == 0) {
-					for (isize i_block = isize(grid.block_rank()) - 1_is; 0 <= i_block; --i_block) {
-						lookback<ComputeType> block_lookback = block_lookbacks[i_block].wait_and_load();
-						
-						block_exclusive_prefix = std::forward<BinaryOp>(binary_op)(block_exclusive_prefix, block_lookback.get());
+					block_exclusive_prefix = std::forward<IdentityOp>(identity_op)();
 
-						if (block_lookback.is_prefixed()) break;
+					for (isize i_block = isize(grid.block_rank()) - 1_is; 0_is <= i_block; --i_block) {
+						bool is_prefixed;
+						ComputeType const value{ block_lookbacks[i_block].spin_and_load(is_prefixed) };
+
+						block_exclusive_prefix = std::forward<BinaryOp>(binary_op)(block_exclusive_prefix, value);
+
+						if (is_prefixed) break;
 					}
 
 					shared_block_exclusive_prefix = block_exclusive_prefix;
@@ -97,19 +98,16 @@ namespace spp {
 				barrier.arrive();
 
 				block_exclusive_prefix = warp.shfl(block_exclusive_prefix, 0);
-
-				return block_exclusive_prefix;
 			}
 			else if (warp.meta_group_rank() + 1 != WarpsPerBlock) {
 				barrier.wait();
 
 				block_exclusive_prefix = shared_block_exclusive_prefix;
-
-				return block_exclusive_prefix;
 			}
 			else {
 				if (warp.thread_rank() + 1 == 32) {
-					block_lookbacks[grid.block_rank()] = lookback<ComputeType>::make_aggregate(warp_exclusive_prefix + warp_reduction);
+					block_lookbacks[grid.block_rank()].store_aggregate(warp_exclusive_prefix + warp_reduction);
+					// block_lookbacks[grid.block_rank()] = lookback<ComputeType>::make_aggregate(warp_exclusive_prefix + warp_reduction);
 				}
 
 				barrier.wait();
@@ -117,11 +115,12 @@ namespace spp {
 				block_exclusive_prefix = shared_block_exclusive_prefix;
 
 				if (warp.thread_rank() + 1 == 32) {
-					block_lookbacks[grid.block_rank()] = lookback<ComputeType>::make_prefix(block_exclusive_prefix + warp_exclusive_prefix + warp_reduction);
+					block_lookbacks[grid.block_rank()].store_prefix(block_exclusive_prefix + warp_exclusive_prefix + warp_reduction);
+					// block_lookbacks[grid.block_rank()] = lookback<ComputeType>::make_prefix(block_exclusive_prefix + warp_exclusive_prefix + warp_reduction);
 				}
-
-				return block_exclusive_prefix;
 			}
+
+			return block_exclusive_prefix;
 
 		}
 
@@ -239,7 +238,8 @@ namespace spp {
 			auto const grid = cg::this_grid();
 
 			for (usize i = grid.thread_rank(); i < num_blocks; i += grid.num_threads()) {
-				block_lookbacks[i] = lookback<T>::zero();
+				block_lookbacks[i].store_invalid();
+				// block_lookbacks[i] = lookback<T>::make_invalid();
 			}
 		}
 
