@@ -10,7 +10,7 @@
 namespace spp {
 
 	template <uint32_t S>
-	struct Byte {
+	struct byte {
 		
 		struct nothing {} paddings[S];
 
@@ -26,15 +26,15 @@ namespace spp {
 			}
 			
 			if constexpr (constexpr uint32_t i = S / 8 * 2; (i + 1) * 4 <= S) {
-				static_cast<int1 *>(dst)[i] = LoadOp<int1>()(static_cast<int1 const *>(src) + i);
+				static_cast<int *>(dst)[i] = LoadOp<int>()(static_cast<int const *>(src) + i);
 			}
 			
 			if constexpr (constexpr uint32_t i = S / 4 * 2; (i + 1) * 2 <= S) {
-				static_cast<short1 *>(dst)[i] = LoadOp<short1>()(static_cast<short1 const *>(src) + i);
+				static_cast<short *>(dst)[i] = LoadOp<short>()(static_cast<short const *>(src) + i);
 			}
 
 			if constexpr (constexpr uint32_t i = S / 2 * 2; i < S) {
-				static_cast<char1 *>(dst)[i] = LoadOp<char1>()(static_cast<char1 const *>(src) + i);
+				static_cast<char *>(dst)[i] = LoadOp<char>()(static_cast<char const *>(src) + i);
 			}
 		}
 
@@ -51,15 +51,15 @@ namespace spp {
 			}
 			
 			if constexpr (constexpr uint32_t i = S / 8 * 2; (i + 1) * 4 <= S) {
-				static_cast<int1 *>(dst)[i] = LoadOp<int1>()(static_cast<int1 const volatile *>(src) + i);
+				static_cast<int *>(dst)[i] = LoadOp<int>()(static_cast<int const volatile *>(src) + i);
 			}
 			
 			if constexpr (constexpr uint32_t i = S / 4 * 2; (i + 1) * 2 <= S) {
-				static_cast<short1 *>(dst)[i] = LoadOp<short1>()(static_cast<short1 const volatile *>(src) + i);
+				static_cast<short *>(dst)[i] = LoadOp<short>()(static_cast<short const volatile *>(src) + i);
 			}
 
 			if constexpr (constexpr uint32_t i = S / 2 * 2; i < S) {
-				static_cast<char1 *>(dst)[i] = LoadOp<char1>()(static_cast<char1 const volatile *>(src) + i);
+				static_cast<char *>(dst)[i] = LoadOp<char>()(static_cast<char const volatile *>(src) + i);
 			}
 		}
 
@@ -67,52 +67,52 @@ namespace spp {
 		__host__ __device__
 		static void copy(void volatile * dst, void const * src) {
 			for (uint32_t i = 0; (i + 1) * 16 <= S; ++i) {
-				StoreOp()(static_cast<int4 volatile *>(dst) + i, LoadOp<int4>()(static_cast<int4 const *>(src) + i));
+				StoreOp<int4>()(static_cast<int4 volatile *>(dst) + i, LoadOp<int4>()(static_cast<int4 const *>(src) + i));
 			}
 			
 			if constexpr (constexpr uint32_t i = S / 16 * 2; (i + 1) * 8 <= S) {
-				StoreOp()(static_cast<int2 volatile *>(dst) + i, LoadOp<int2>()(static_cast<int2 const *>(src) + i));
+				StoreOp<int2>()(static_cast<int2 volatile *>(dst) + i, LoadOp<int2>()(static_cast<int2 const *>(src) + i));
 			}
 			
 			if constexpr (constexpr uint32_t i = S / 8 * 2; (i + 1) * 4 <= S) {
-				StoreOp()(static_cast<int1 volatile *>(dst) + i, LoadOp<int1>()(static_cast<int1 const *>(src) + i));
+				StoreOp<int>()(static_cast<int volatile *>(dst) + i, LoadOp<int>()(static_cast<int const *>(src) + i));
 			}
 			
 			if constexpr (constexpr uint32_t i = S / 4 * 2; (i + 1) * 2 <= S) {
-				StoreOp()(static_cast<short1 volatile *>(dst) + i, LoadOp<short1>()(static_cast<short1 const *>(src) + i));
+				StoreOp<short>()(static_cast<short volatile *>(dst) + i, LoadOp<short>()(static_cast<short const *>(src) + i));
 			}
 
 			if constexpr (constexpr uint32_t i = S / 2 * 2; i < S) {
-				StoreOp()(static_cast<char1 volatile *>(dst) + i, LoadOp<char1>()(static_cast<char1 const *>(src) + i));
+				StoreOp<char>()(static_cast<char volatile *>(dst) + i, LoadOp<char>()(static_cast<char const *>(src) + i));
 			}
 		}
 
-		Byte() = delete;
+		byte() = delete;
 
-		~Byte() = delete;
-
-		__host__ __device__
-		Byte(Byte const &) = delete;
+		~byte() = delete;
 
 		__host__ __device__
-		Byte & operator=(Byte const &) = delete;
+		byte(byte const &) = delete;
 
 		__host__ __device__
-		Byte(Byte &&) = delete;
+		byte & operator=(byte const &) = delete;
 
 		__host__ __device__
-		Byte & operator=(Byte &&) = delete;
+		byte(byte &&) = delete;
+
+		__host__ __device__
+		byte & operator=(byte &&) = delete;
 
 	};
 
 	template <typename T>
-	using BytesOf = Byte<sizeof(T)>;
+	using bytes_of	= byte<sizeof(T)>;
 
-	using byte		= Byte<1>;
-	using byte2		= Byte<2>;
-	using byte4		= Byte<4>;
-	using byte8		= Byte<8>;
-	using byte16	= Byte<16>;
+	using byte1		= byte<1>;
+	using byte2		= byte<2>;
+	using byte4		= byte<4>;
+	using byte8		= byte<8>;
+	using byte16	= byte<16>;
 
 }
 

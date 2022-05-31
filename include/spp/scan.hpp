@@ -184,12 +184,8 @@ namespace spp {
 
 				ComputeType item = identity_op();
 				if (item_rank < size) {
-					// if constexpr (std::is_same_v<InputType, ComputeType>) {
-					// 	Byte<sizeof(ValueTy)>::copy(&item, &data_in[item_rank]);
-					// 	item = prologue(item);
-					// }
 					InputType input;
-					Byte<sizeof(InputType)>::copy(&input, &data_in[item_rank]);
+					bytes_of<InputType>::copy(&input, &data_in[item_rank]);
 					item = prologue(input);
 				}
 
@@ -224,7 +220,7 @@ namespace spp {
 				
 				if (item_rank < size) {
 					OutputType item = epilogue(binary_op(block_warp_exclusive_prefix, item_prefixes[i_tile]));
-					Byte<sizeof(OutputType)>::copy(&data_out[item_rank], &item);
+					bytes_of<OutputType>::copy(&data_out[item_rank], &item);
 				}
 			}
 

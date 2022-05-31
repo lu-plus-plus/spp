@@ -31,12 +31,10 @@ namespace spp {
 
 	public:
 
-		/* constructors */
+		/* constructors and assignment operators */
 
 		constexpr
 		lookback() = default;
-
-		/* copy / move constructors */
 
 		constexpr
 		lookback(lookback const &) = default;
@@ -44,37 +42,11 @@ namespace spp {
 		constexpr
 		lookback(lookback &&) = default;
 
-		// constexpr
-		// __host__ __device__
-		// lookback(lookback const volatile & rhs) : m_status(rhs.m_status), m_aggregate(rhs.m_aggregate), m_prefix(rhs.m_prefix) {}
-
-		/* assignment opeartors */
-
 		lookback & operator=(lookback const &) = default;
 		
 		lookback & operator=(lookback &&) = default;
 
-		// __host__ __device__
-		// lookback & operator=(lookback const volatile & rhs) {
-		// 	// BytesOf<lookback>::copy(this, &rhs);
-		// 	this->m_status = rhs.m_status;
-		// 	this->m_aggregate = rhs.m_aggregate;
-		// 	this->m_prefix = rhs.m_prefix;
-			
-		// 	return *this;
-		// }
-
-		// __device__
-		// lookback volatile & operator=(lookback const & rhs) volatile {
-		// 	this->m_aggregate = rhs.m_aggregate;
-		// 	this->m_prefix = rhs.m_prefix;
-		// 	__threadfence();
-		// 	this->m_status = rhs.m_status;
-
-		// 	return *this;
-		// }
-
-		/* initializers */
+		/* setters for struct in global memory */
 
 		__device__
 		lookback volatile & store_invalid() volatile {
@@ -103,171 +75,120 @@ namespace spp {
 			return *this;
 		}
 
-		// static constexpr
-		// __host__ __device__
-		// lookback make_invalid() {
-		// 	return lookback{ e_status::invalid, T{}, T{} };
-		// }
+		/* getters for struct in global memory */
 
-		// static constexpr
-		// __host__ __device__
-		// lookback make_aggregate(T value) {
-		// 	return lookback{ e_status::aggregated, value, T{} };
-		// }
-
-		// static constexpr
-		// __host__ __device__
-		// lookback make_prefix(T value) {
-		// 	return lookback{ e_status::prefixed, T{}, value };
-		// }
-
-		/* getters */
-
-		// __host__ __device__
-		// bool is_prefixed() const {
-		// 	return m_status == e_status::prefixed;
-		// }
-
-		// __host__ __device__
-		// bool is_aggregated() const {
-		// 	return m_status == e_status::aggregated;
-		// }
-
-		// __host__ __device__
-		// bool is_invalid() const {
-		// 	return m_status == e_status::invalid;
-		// }
-
-		// __host__ __device__
-		// T aggregate() const {
-		// 	return m_aggregate;
-		// }
-
-		// __host__ __device__
-		// T prefix() const {
-		// 	return m_prefix;
-		// }
-
-		__host__ __device__
+		__device__
 		T spin_and_load(bool & is_prefixed) const volatile {
 			e_status status;
 			do status = m_status; while (status == e_status::invalid);
 			is_prefixed = status == e_status::prefixed;
 			return is_prefixed ? m_prefix : m_aggregate;
-
-			// lookback result;
-			// do result = *this; while (result.is_invalid());
-			// return result;
 		}
 
 	};
 
 
 
-	// template <typename UInt>
-	// struct lookback<UInt, std::enable_if_t<std::is_unsigned_v<UInt>>> {
+	template <typename UInt>
+	struct lookback<UInt, std::enable_if_t<std::is_unsigned_v<UInt>>> {
 
-	// private:
+	private:
 
-	// 	static constexpr
-	// 	usize bits = sizeof(UInt) * 8;
+		static constexpr
+		usize bits = sizeof(UInt) * 8;
 
-	// 	static constexpr
-	// 	UInt prefix_bit = UInt(1) << (bits - 1);
+		static constexpr
+		UInt prefix_bit = UInt(1) << (bits - 1);
 
-	// 	static constexpr
-	// 	UInt aggregate_bit = UInt(1) << (bits - 2);
+		static constexpr
+		UInt aggregate_bit = UInt(1) << (bits - 2);
 
-	// 	static constexpr
-	// 	UInt value_mask = (~ UInt(0)) >> 2;
+		static constexpr
+		UInt value_mask = (~ UInt(0)) >> 2;
 
-	// 	static constexpr
-	// 	UInt flags_mask = ~ value_mask;
+		static constexpr
+		UInt flags_mask = ~ value_mask;
 
-	// 	UInt data;
+		UInt m_data;
 
-	// 	constexpr
-	// 	__host__ __device__
-	// 	lookback(UInt data_) : data(data_) {}
+		constexpr
+		__host__ __device__
+		lookback(UInt value) : m_data(value) {}
 
-	// public:
+	public:
 
-	// 	/* copy / move ctors */
+		/* constructors and assignment operators */
 
-	// 	lookback(lookback const &) noexcept = default;
+		constexpr
+		lookback() = default;
 
-	// 	lookback(lookback &&) noexcept = default;
+		constexpr
+		lookback(lookback const &) = default;
 
-	// 	constexpr
-	// 	__host__ __device__
-	// 	lookback(lookback const volatile & rhs) noexcept : data(rhs.data) {}
+		constexpr
+		lookback(lookback &&) = default;
 
-	// 	/* copy / move assignment opeartors */
-
-	// 	lookback & operator=(lookback const &) noexcept = default;
+		lookback & operator=(lookback const &) = default;
 		
-	// 	lookback & operator=(lookback &&) noexcept = default;
+		lookback & operator=(lookback &&) = default;
 
-	// 	__host__ __device__
-	// 	lookback & operator=(lookback const volatile & rhs) noexcept {
-	// 		data = rhs.data;
-	// 	}
+		/* setters for struct in global memory */
 
-	// 	__host__ __device__
-	// 	lookback volatile & operator=(lookback const & rhs) volatile noexcept {
-	// 		data = rhs.data;
-	// 	}
+		__host__ __device__
+		lookback volatile & store_invalid() volatile {
+			m_data = UInt(0);
+			return *this;
+		}
 
-	// 	/* initializers */
+		__host__ __device__
+		lookback volatile & store_aggregate(UInt value) volatile {
+			m_data = (value & value_mask) | aggregate_bit;
+			return *this;
+		}
 
-	// 	static constexpr
-	// 	__host__ __device__
-	// 	lookback make_invalid() noexcept {
-	// 		return lookback{ 0 };
-	// 	}
+		__host__ __device__
+		lookback volatile & store_prefix(UInt value) volatile {
+			m_data = (value & value_mask) | prefix_bit;
+			return *this;
+		}
 
-	// 	static constexpr
-	// 	__host__ __device__
-	// 	lookback make_aggregate(UInt value) noexcept {
-	// 		return lookback{ (value & value_mask) | aggregate_bit };
-	// 	}
+		/* getters for struct in global memory */
 
-	// 	static constexpr
-	// 	__host__ __device__
-	// 	lookback make_prefix(UInt value) noexcept {
-	// 		return lookback{ (value & value_mask) | prefix_bit };
-	// 	}
+		static
+		__host__ __device__
+		bool is_prefixed(UInt data) {
+			return (data & prefix_bit) != 0;
+		}
 
-	// 	/* getters */
+		static
+		__host__ __device__
+		bool is_aggregated(UInt data) {
+			return (data & aggregate_bit) != 0;
+		}
 
-	// 	__host__ __device__
-	// 	bool is_prefixed() const noexcept {
-	// 		return (data & prefix_bit) != 0;
-	// 	}
+		static
+		__host__ __device__
+		bool is_invalid(UInt data) {
+			return (data & flags_mask) == 0;
+		}
 
-	// 	__host__ __device__
-	// 	bool is_aggregated() const noexcept {
-	// 		return (data & aggregate_bit) != 0;
-	// 	}
+		static
+		__host__ __device__
+		UInt value(UInt data) {
+			return data & value_mask;
+		}
 
-	// 	__host__ __device__
-	// 	bool is_invalid() const noexcept {
-	// 		return (data & flags_mask) == 0;
-	// 	}
-
-	// 	__host__ __device__
-	// 	UInt value() const noexcept {
-	// 		return data & value_mask;
-	// 	}
-
-	// 	__host__ __device__
-	// 	lookback spin_and_load_value() const volatile noexcept {
-	// 		lookback result{ *this };
-	// 		while (result.is_invalid()) result = *this;
-	// 		return result;
-	// 	}
+		__host__ __device__
+		UInt spin_and_load(bool & prefixed) const volatile {
+			UInt data;
+			do data = m_data; while (is_invalid(data));
+			
+			prefixed = is_prefixed(data);
+			
+			return value(data);
+		}
 		
-	// };
+	};
 
 }
 
