@@ -27,8 +27,6 @@ int main(void) {
 	spp::test::tester<size_t>(
 		spp_test_functor_of(cub::DeviceRadixSort::SortKeys),
 		d_data_in.data(), d_cub_data_out.data(), item_count
-	).config(
-		10, 50
 	).benchmark(
 		spp_test_functor_of(cub::DeviceRadixSort::SortKeys),
 		d_data_in.data(), d_cub_data_out.data(), item_count
@@ -37,8 +35,6 @@ int main(void) {
 	spp::test::tester<uint32_t>(
 		spp_test_functor_of(spp::kernel::radix_sort),
 		d_data_in.data(), d_spp_data_out.data(), item_count
-	).config(
-		10, 50
 	).benchmark(
 		spp_test_functor_of(spp::kernel::radix_sort),
 		d_data_in.data(), d_spp_data_out.data(), item_count

@@ -8,6 +8,7 @@
 #include "types.hpp"
 #include "lookback.hpp"
 #include "kernel_launch.hpp"
+#include "histogram.hpp"
 
 
 
@@ -92,89 +93,39 @@ namespace spp {
 
 
 
-	template <usize ThreadsPerBlock, usize ItemsPerThread, typename Histogram, typename Binning>
+	template <usize ThreadsPerBlock, template <typename> typename Histogram>
 	__global__
-	void histogram(u32 const * items, usize num_items, Histogram * p_grid_histogram, Binning binning) {
-	
-		usize constexpr WarpsPerBlock	= ThreadsPerBlock / 32;
-		usize constexpr ItemsPerWarp	= ItemsPerThread * 32;
+	void init_block_radix_histograms(Histogram<lookback<u32>> * block_histograms, Histogram<u32> * p_grid_histogram) {
+		static_assert(ThreadsPerBlock == (*p_grid_histogram).size(), "invalid block dimension");
+		
+		usize constexpr WarpsPerBlock{ ThreadsPerBlock / 32 };
 
-		auto const grid		= cg::this_grid();
-		auto const block	= cg::this_thread_block();
-		auto const warp		= cg::tiled_partition<32>(block);
-
-		Histogram & grid_histogram = *p_grid_histogram;
-
-		for (usize bin_rank = grid.thread_rank(); bin_rank < Histogram::size(); bin_rank += grid.num_threads()) {
-			grid_histogram[bin_rank] = 0;
-		}
-
-		__shared__ Histogram block_histogram;
-
-		for (usize bin_rank = block.thread_rank(); bin_rank < Histogram::size(); bin_rank += block.num_threads()) {
-			block_histogram[bin_rank] = 0;
-		}
-
-		grid.sync();
-
-		usize const i_warp_begin	= grid.block_rank() * WarpsPerBlock + warp.meta_group_rank();
-		usize const i_warp_end		= ceiled_div(num_items, ItemsPerWarp);
-		usize const i_warp_step		= grid.num_blocks() * warp.meta_group_size();
-
-		for (usize i_warp = i_warp_begin; i_warp < i_warp_end; i_warp += i_warp_step) {
-			usize const thread_rank_begin = i_warp * ItemsPerWarp + warp.thread_rank();
-
-			u32 thread_items[ItemsPerThread];
-
-			for (usize j_item = 0; j_item < ItemsPerThread; ++j_item) {
-				usize const item_rank = thread_rank_begin + 32 * j_item;
-				if (item_rank < num_items) {
-					thread_items[j_item] = items[item_rank];
-				}
-			}
-
-			for (usize j_item = 0; j_item < ItemsPerThread; ++j_item) {
-				usize const item_rank = thread_rank_begin + 32 * j_item;
-				if (item_rank < num_items) {
-					usize const key = binning(thread_items[j_item]);
-					atomicAdd(&(block_histogram[key]), 1);
-				}
-			}
-		}
-
-		block.sync();
-
-		for (usize bin_rank = block.thread_rank(); bin_rank < Histogram::size(); bin_rank += block.num_threads()) {
-			atomicAdd(&(grid_histogram[bin_rank]), block_histogram[bin_rank]);
-		}
-
-		grid.sync();
-
-		if (grid.block_rank() == 0 and warp.meta_group_rank() == 0) {
-			usize partial_result = 0_us;
-			
-			for (usize i = 0; i < Histogram::size() / 32; ++i) {
-				usize const bin_rank = i * 32 + warp.thread_rank();
-				usize const bin_value = grid_histogram[bin_rank];
+		auto const grid		{ cg::this_grid() };
+		auto const block	{ cg::this_thread_block() };
+		auto const warp		{ cg::tiled_partition<32>(block) };
 				
-				usize const exclusive_prefix = partial_result + cg::exclusive_scan(warp, bin_value);
-				grid_histogram[bin_rank] = exclusive_prefix;
-				
-				usize const inclusive_prefix = exclusive_prefix + bin_value;
-				partial_result = warp.shfl(inclusive_prefix, 31);
+		block_histograms[grid.block_rank()][block.thread_rank()].store_invalid();
+
+		if (grid.block_rank() == 0) {
+			u32 const radix_partial_result{ (*p_grid_histogram)[block.thread_rank()] };
+			u32 const radix_exclusive_prefix{ cg::exclusive_scan(warp, radix_partial_result) };
+
+			__shared__ u32 shared_grid_histogram[WarpsPerBlock];
+			if (warp.thread_rank() + 1 == 32) {
+				shared_grid_histogram[warp.meta_group_rank()] = radix_exclusive_prefix + radix_partial_result;
 			}
+			block.sync();
+
+			if (warp.meta_group_rank() == 0 and warp.thread_rank() < ThreadsPerBlock / 32) {
+				u32 const warp_partial_result{ shared_grid_histogram[warp.thread_rank()] };
+				u32 const warp_exclusive_prefix{ cg::exclusive_scan(cg::coalesced_threads(), warp_partial_result) };
+				shared_grid_histogram[warp.thread_rank()] = warp_exclusive_prefix;
+			}
+			block.sync();
+
+			u32 const warp_exclusive_prefix{ shared_grid_histogram[warp.meta_group_rank()] };
+			(*p_grid_histogram)[block.thread_rank()] = warp_exclusive_prefix + radix_exclusive_prefix;
 		}
-
-	}
-
-
-
-	template <template <typename> typename Histogram>
-	__global__
-	void init_block_radix_histograms(Histogram<lookback<u32>> * block_radix_histograms) {
-		auto const grid		= cg::this_grid();
-		auto const block	= cg::this_thread_block();
-		block_radix_histograms[grid.block_rank()][block.thread_rank()].store_invalid();
 	}
 
 
@@ -420,7 +371,7 @@ namespace spp {
 						usize constexpr histogram_block_threads = 512;
 						usize constexpr histogram_thread_items = 16;
 
-						auto fn_histogram = reinterpret_cast<void const *>(histogram<histogram_block_threads, histogram_thread_items, details::radix_histogram<u32>, details::radix_binning>);
+						auto fn_histogram = reinterpret_cast<void const *>(global::histogram<histogram_block_threads, histogram_thread_items, u32 const *, details::radix_histogram<u32>, details::radix_binning>);
 						
 						i32 histogram_grid_blocks = 0;
 						cudaCheck(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&histogram_grid_blocks, fn_histogram, histogram_block_threads, 0));
@@ -438,11 +389,11 @@ namespace spp {
 					}
 
 					/* init radix lookback */ {
-						auto fn_init_lookback = reinterpret_cast<void const *>(init_block_radix_histograms<details::radix_histogram>);
+						auto fn_init_lookback = reinterpret_cast<void const *>(init_block_radix_histograms<details::radix_histogram<u32>::size(), details::radix_histogram>);
 
-						auto block_dim	= dim3(256);
+						auto block_dim	= dim3(details::radix_histogram<u32>::size());
 						auto grid_dim	= dim3(radix_sort_num_blocks);
-						void * args[]	= { &block_radix_histograms };
+						void * args[]	= { &block_radix_histograms, &p_grid_radix_histogram };
 
 						auto result		= cudaLaunchKernel(fn_init_lookback, grid_dim, block_dim, args);
 						if (cudaSuccess != result) return result;
