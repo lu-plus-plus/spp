@@ -5,6 +5,7 @@
 #include <cooperative_groups/scan.h>
 
 #include "types.hpp"
+#include "traits.hpp"
 #include "pipelined_for.hpp"
 
 
@@ -17,10 +18,12 @@ namespace spp {
 
 	namespace global {
 
-		template <usize ThreadsPerBlock, usize ItemsPerThread, typename InputIterator, typename Histogram, typename Binning>
+		template <usize ThreadsPerBlock, usize ItemsPerThread, typename InputIterator, typename HistogramIterator, typename Binning>
 		__global__
-		void histogram(InputIterator data_in, usize size, Histogram * p_grid_histogram, Binning binning) {
+		void histogram(InputIterator data_in, usize size, HistogramIterator p_grid_histogram, Binning binning) {
 		
+			using Histogram = std::decay_t<dereference_t<HistogramIterator>>;
+
 			usize constexpr WarpsPerBlock	{ ThreadsPerBlock / 32 };
 			usize constexpr ItemsPerWarp	{ ItemsPerThread * 32 };
 
@@ -74,6 +77,22 @@ namespace spp {
 		} // histogram
 	
 	} // namespace global
+
+
+
+	namespace kernel {
+
+		template <typename InputIterator, typename HistogramIterator, typename Binning>
+		cudaError_t histogram(InputIterator && data_in, usize size, HistogramIterator && p_histogram, Binning && binning) {
+			usize constexpr ThreadsPerBlock{ 512 };
+			usize constexpr ItemsPerThread{ 16 };
+			
+			auto fn{ global::histogram<ThreadsPerBlock, ItemsPerThread, std::decay_t<InputIterator>, std::decay_t<HistogramIterator>, std::decay_t<Binning>> };
+			
+			return launch_cooperative_kernel(fn, ThreadsPerBlock, std::forward<InputIterator>(data_in), size, std::forward<HistogramIterator>(p_histogram), std::forward<Binning>(binning));
+		}
+
+	}
 
 } // namespace spp
 

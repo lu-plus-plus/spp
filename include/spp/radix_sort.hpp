@@ -343,9 +343,9 @@ namespace spp {
 			
 			usize const radix_sort_num_blocks = ceiled_div(size, items_per_block);
 
-			usize const d_histogram_bytes = ceiled_div(sizeof(details::radix_histogram<u32>), 128) * 128;
-			usize const d_radix_sort_bytes = ceiled_div(sizeof(details::radix_histogram<lookback<u32>>) * radix_sort_num_blocks, 128) * 128;
-			usize const d_keys_temp_bytes = ceiled_div(sizeof(u32) * size, 128) * 128;
+			usize const d_histogram_bytes = aligned_bytes_for(sizeof(details::radix_histogram<u32>));
+			usize const d_radix_sort_bytes = aligned_bytes_for(sizeof(details::radix_histogram<lookback<u32>>) * radix_sort_num_blocks);
+			usize const d_keys_temp_bytes = aligned_bytes_for(sizeof(u32) * size);
 
 			if (d_temp_storage == nullptr) {
 				d_temp_storage_bytes = d_histogram_bytes + d_radix_sort_bytes + d_keys_temp_bytes;
@@ -353,14 +353,12 @@ namespace spp {
 				return cudaSuccess;
 			}
 			else {
-				auto p_grid_radix_histogram = static_cast<std::byte *>(d_temp_storage);
-				auto block_radix_histograms = static_cast<std::byte *>(d_temp_storage) + d_histogram_bytes;
-				auto keys_temp = static_cast<std::byte *>(d_temp_storage) + d_histogram_bytes + d_radix_sort_bytes;
+				auto p_grid_radix_histogram{ static_cast<details::radix_histogram<u32> *>(d_temp_storage) };
+				auto block_radix_histograms{ static_cast<details::radix_histogram<lookback<u32>> *>(offset_bytes(d_temp_storage, d_histogram_bytes)) };
+				auto keys_temp{ static_cast<u32 *>(offset_bytes(d_temp_storage, d_histogram_bytes + d_radix_sort_bytes)) };
 
-				void * keys_ins[] = { &keys_in, &keys_temp, &keys_out, &keys_temp };
-				void * keys_outs[] = { &keys_temp, &keys_out, &keys_temp, &keys_out };
-
-				// [todo] initialize block lookbacks
+				u32 const *	keys_in_pass[]	= { keys_in,	keys_temp,	keys_out,	keys_temp };
+				u32 *		keys_out_pass[]	= { keys_temp,	keys_out,	keys_temp,	keys_out };
 
 				for (usize i_pass = 0; i_pass < 4; ++i_pass) {
 
@@ -368,23 +366,7 @@ namespace spp {
 					auto match_any = details::match_any();
 
 					/* histogram */ {
-						usize constexpr histogram_block_threads = 512;
-						usize constexpr histogram_thread_items = 16;
-
-						auto fn_histogram = reinterpret_cast<void const *>(global::histogram<histogram_block_threads, histogram_thread_items, u32 const *, details::radix_histogram<u32>, details::radix_binning>);
-						
-						i32 histogram_grid_blocks = 0;
-						cudaCheck(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&histogram_grid_blocks, fn_histogram, histogram_block_threads, 0));
-						
-						cudaDeviceProp prop;
-						cudaGetDeviceProperties(&prop, 0);
-						histogram_grid_blocks *= prop.multiProcessorCount;
-
-						auto grid_dim	= dim3(histogram_grid_blocks);
-						auto block_dim	= dim3(histogram_block_threads);
-						void * args[]	= { keys_ins[i_pass], &size, &p_grid_radix_histogram, &binning };
-
-						auto result = cudaLaunchCooperativeKernel(fn_histogram, grid_dim, block_dim, args);
+						auto result = kernel::histogram(keys_in_pass[i_pass], size, p_grid_radix_histogram, binning);
 						if (cudaSuccess != result) return result;
 					}
 
@@ -407,9 +389,9 @@ namespace spp {
 
 						auto grid_dim	= dim3(radix_sort_num_blocks);
 						auto block_dim	= dim3(radix_pass_threads_per_block);
-						void * args[]	= { keys_ins[i_pass], keys_outs[i_pass], &size, &block_radix_histograms, &p_grid_radix_histogram, &binning, &match_any };
+						void * args[]	= { &keys_in_pass[i_pass], &keys_out_pass[i_pass], &size, &block_radix_histograms, &p_grid_radix_histogram, &binning, &match_any };
 
-						auto result = cudaLaunchKernel(fn_radix_pass, grid_dim, block_dim, args);
+						auto result		= cudaLaunchKernel(fn_radix_pass, grid_dim, block_dim, args);
 						if (cudaSuccess != result) return result;
 					}
 
