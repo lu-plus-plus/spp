@@ -7,6 +7,7 @@
 #include "types.hpp"
 #include "traits.hpp"
 #include "pipelined_for.hpp"
+#include "kernel_launch.hpp"
 
 
 
