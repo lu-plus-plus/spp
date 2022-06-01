@@ -131,7 +131,7 @@ namespace spp {
 
 
 
-	template <usize ItemsPerThread, usize ThreadsPerBlock, template <typename> typename Histogram, typename Binning, typename MatchAny>
+	template <usize ThreadsPerBlock, usize ItemsPerThread, template <typename> typename Histogram, typename Binning, typename MatchAny>
 	__global__
 	void radix_scan_by_key_with_large_block(u32 const * keys_in, u32 * keys_out, usize size,
 		Histogram<lookback<u32>> volatile * block_radix_histograms,
@@ -287,10 +287,13 @@ namespace spp {
 	namespace details {
 
 		inline constexpr
-		usize radix_lane_bits = 8;
+		usize radix_lane_bits = 8_us;
+
+		inline constexpr
+		usize radix_lane_banks = 1_us << radix_lane_bits;
 
 		template <typename T>
-		using radix_histogram = vector<T, (1 << radix_lane_bits)>;
+		using radix_histogram = vector<T, radix_lane_banks>;
 
 		struct radix_binning {
 			usize radix_lane_idx;
@@ -299,7 +302,7 @@ namespace spp {
 
 			__host__ __device__
 			usize operator()(u32 key) const noexcept {
-				return (key >> (radix_lane_idx * radix_lane_bits)) & ((1 << radix_lane_bits) - 1);
+				return (key >> (radix_lane_idx * radix_lane_bits)) & (radix_lane_banks - 1);
 			}
 		};
 
@@ -338,16 +341,17 @@ namespace spp {
 		cudaError_t radix_sort(void * d_temp_storage, usize & d_temp_storage_bytes,
 			u32 const * keys_in, u32 * keys_out, usize size) {
 			
-			usize constexpr items_per_thread = 16;
-			usize constexpr threads_per_block = 1 << details::radix_lane_bits;
-			usize constexpr items_per_block = items_per_thread * threads_per_block;
+			usize constexpr	radix_sort_items_per_thread		= 16;
+			usize constexpr	radix_sort_threads_per_block	= details::radix_lane_banks;
+			usize constexpr	radix_sort_items_per_block		= radix_sort_items_per_thread * radix_sort_threads_per_block;
 			
-			usize const radix_sort_num_blocks = ceiled_div(size, items_per_block);
+			usize const		radix_sort_num_blocks			= ceiled_div(size, radix_sort_items_per_block);
 
-			memory_sections<
-				details::radix_histogram<u32>, details::radix_histogram<lookback<u32>>, u32
-			> sections{
-				d_temp_storage, { 1, radix_sort_num_blocks, size }
+			usize const		d_grid_histogram_count			= 1_us;
+			usize const		d_block_histogram_count			= radix_sort_num_blocks;
+			usize const		d_keys_temp_count				= size;
+			memory_sections < details::radix_histogram<u32>, details::radix_histogram<lookback<u32>>, u32 > sections {
+				d_temp_storage, { d_grid_histogram_count, d_block_histogram_count, d_keys_temp_count }
 			};
 
 			if (d_temp_storage == nullptr) {
@@ -356,7 +360,7 @@ namespace spp {
 				return cudaSuccess;
 			}
 			else {
-				auto [p_grid_radix_histogram, block_radix_histograms, keys_temp] = sections.ptrs();
+				auto [p_grid_histogram, block_histograms, keys_temp] = sections.ptrs();
 
 				u32 const *	keys_in_pass[]	= { keys_in,	keys_temp,	keys_out,	keys_temp };
 				u32 *		keys_out_pass[]	= { keys_temp,	keys_out,	keys_temp,	keys_out };
@@ -367,32 +371,29 @@ namespace spp {
 					auto match_any = details::match_any();
 
 					/* histogram */ {
-						auto result = kernel::histogram(keys_in_pass[i_pass], size, p_grid_radix_histogram, binning);
+						auto result = kernel::histogram(keys_in_pass[i_pass], size, p_grid_histogram, binning);
 						if (cudaSuccess != result) return result;
 					}
 
-					/* init radix lookback */ {
-						auto fn_init_lookback = reinterpret_cast<void const *>(init_block_radix_histograms<details::radix_histogram<u32>::size(), details::radix_histogram>);
-
-						auto block_dim	= dim3(details::radix_histogram<u32>::size());
+					/* initialize block histograms, and exclusively scan the grid histogram */ {
+						auto fn			= init_block_radix_histograms<details::radix_histogram<u32>::size(), details::radix_histogram>;
 						auto grid_dim	= dim3(radix_sort_num_blocks);
-						void * args[]	= { &block_radix_histograms, &p_grid_radix_histogram };
+						auto block_dim	= dim3(details::radix_histogram<u32>::size());
 
-						auto result		= cudaLaunchKernel(fn_init_lookback, grid_dim, block_dim, args);
+						auto result		= launch_kernel(fn, grid_dim, block_dim,
+							block_histograms, p_grid_histogram
+						);
 						if (cudaSuccess != result) return result;
 					}
 
 					/* radix sort */ {
-						usize constexpr radix_pass_threads_per_block = 1 << details::radix_lane_bits;
-						usize constexpr radix_pass_items_per_thread = 16;
-
-						auto fn_radix_pass = reinterpret_cast<void const *>(radix_scan_by_key_with_large_block<radix_pass_items_per_thread, radix_pass_threads_per_block, details::radix_histogram, details::radix_binning, details::match_any>);
-
+						auto fn			= radix_scan_by_key_with_large_block<radix_sort_threads_per_block, radix_sort_items_per_thread, details::radix_histogram, details::radix_binning, details::match_any>;
 						auto grid_dim	= dim3(radix_sort_num_blocks);
-						auto block_dim	= dim3(radix_pass_threads_per_block);
-						void * args[]	= { &keys_in_pass[i_pass], &keys_out_pass[i_pass], &size, &block_radix_histograms, &p_grid_radix_histogram, &binning, &match_any };
+						auto block_dim	= dim3(radix_sort_threads_per_block);
 
-						auto result		= cudaLaunchKernel(fn_radix_pass, grid_dim, block_dim, args);
+						auto result		= launch_kernel(fn, grid_dim, block_dim,
+							keys_in_pass[i_pass], keys_out_pass[i_pass], size, block_histograms, p_grid_histogram, binning, match_any
+						);
 						if (cudaSuccess != result) return result;
 					}
 
