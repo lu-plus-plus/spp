@@ -7,6 +7,7 @@
 
 #include "types.hpp"
 #include "lookback.hpp"
+#include "pipelined_for.hpp"
 #include "kernel_launch.hpp"
 #include "memory_sections.hpp"
 
@@ -213,28 +214,7 @@ namespace spp {
 			warp.sync();
 		};
 
-		usize constexpr ItemsPerLoading = 2;
-		usize constexpr LoadingsPerThread = ItemsPerThread / ItemsPerLoading;
-
-		for (usize i_key = 0; i_key < ItemsPerLoading; ++i_key) {
-			load_key(i_key);
-		}
-
-		for (usize i_loaded = 0; i_loaded < LoadingsPerThread; ++i_loaded) {
-			usize const ii_loading = i_loaded + 1;
-
-			if (ii_loading != LoadingsPerThread) {
-				for (usize j_key = 0; j_key < ItemsPerLoading; ++j_key) {
-					usize const k_load = ii_loading * ItemsPerLoading + j_key;
-					load_key(k_load);
-				}
-			}
-
-			for (usize j_key = 0; j_key < ItemsPerLoading; ++j_key) {
-				usize const k_load = i_loaded * ItemsPerLoading + j_key;
-				scan_thread_prefix(k_load);
-			}
-		}
+		device::pipelined_for<ItemsPerThread, 2>(load_key, scan_thread_prefix);
 
 		block.sync();
 
