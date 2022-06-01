@@ -138,8 +138,9 @@ namespace spp {
 	template <bool WithIndices, usize ThreadsPerBlock, usize ItemsPerThread,
 		template <typename> typename Histogram, typename Binning, typename MatchAny>
 	__global__
-	void generic_radix_sort_scan_lane(u32 const * keys_in, u32 * keys_out, usize size,
+	void generic_radix_sort_scan_lane(u32 const * keys_in, u32 * keys_out,
 		u32 const * indices_in, u32 * indices_out,
+		usize size,
 		Histogram<lookback<u32>> volatile * block_radix_histograms,
 		Histogram<u32> const * p_grid_radix_histogram,
 		Binning binning, MatchAny match_any) {
@@ -349,8 +350,9 @@ namespace spp {
 
 		template <bool WithIndices, typename InputIterator, typename OutputIterator>
 		cudaError_t generic_radix_sort(void * d_temp_storage, usize & d_temp_storage_bytes,
-			u32 const * keys_in, u32 * keys_out, usize size,
-			InputIterator values_in, OutputIterator values_out) {
+			u32 const * keys_in, u32 * keys_out,
+			InputIterator values_in, OutputIterator values_out,
+			usize size) {
 			
 			usize constexpr	radix_sort_items_per_thread		= 16;
 			usize constexpr	radix_sort_threads_per_block	= details::radix_lane_banks;
@@ -412,8 +414,9 @@ namespace spp {
 						auto block_dim	= dim3(radix_sort_threads_per_block);
 
 						auto result		= launch_kernel(fn, grid_dim, block_dim,
-							keys_in_pass[i_pass], keys_out_pass[i_pass], size,
+							keys_in_pass[i_pass], keys_out_pass[i_pass],
 							indices_in_pass[i_pass], indices_out_pass[i_pass],
+							size,
 							block_histograms, p_grid_histogram, binning, match_any
 						);
 						if (cudaSuccess != result) return result;
@@ -444,8 +447,21 @@ namespace spp {
 
 			return generic_radix_sort<false>(
 				d_temp_storage, d_temp_storage_bytes,
-				keys_in, keys_out, size,
-				nullptr, nullptr
+				keys_in, keys_out, nullptr, nullptr, size
+			);
+		}
+
+
+
+		template <typename InputIterator, typename OutputIterator>
+		cudaError_t radix_sort_by_key(void * d_temp_storage, usize & d_temp_storage_bytes,
+			u32 const * keys_in, u32 * keys_out,
+			InputIterator values_in, OutputIterator values_out,
+			usize size) {
+			
+			return generic_radix_sort<true>(
+				d_temp_storage, d_temp_storage_bytes,
+				keys_in, keys_out, values_in, values_out, size
 			);
 		}
 

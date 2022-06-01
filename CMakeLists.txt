@@ -33,7 +33,10 @@ endfunction()
 
 single_file_test(inclusive_scan)
 single_file_test(exclusive_scan)
+
 single_file_test(radix_sort)
+single_file_test(radix_sort_by_key)
+
 single_file_test(reduce)
 
 
