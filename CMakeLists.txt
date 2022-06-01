@@ -23,6 +23,10 @@ function(single_file_test filename_wo_ext)
 		CUDA_ARCHITECTURES OFF
 		CUDA_SEPARABLE_COMPILATION ON
 	)
+
+	target_compile_options(${filename_wo_ext} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:
+		--extended-lambda
+	>)
 endfunction()
 
 

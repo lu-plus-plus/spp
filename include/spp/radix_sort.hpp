@@ -7,9 +7,13 @@
 
 #include "types.hpp"
 #include "lookback.hpp"
-#include "histogram.hpp"
 #include "kernel_launch.hpp"
 #include "memory_sections.hpp"
+
+#include "iterator.hpp"
+#include "copy.hpp"
+#include "histogram.hpp"
+#include "transform.hpp"
 
 
 
@@ -96,7 +100,7 @@ namespace spp {
 
 	template <usize ThreadsPerBlock, template <typename> typename Histogram>
 	__global__
-	void init_block_radix_histograms(Histogram<lookback<u32>> * block_histograms, Histogram<u32> * p_grid_histogram) {
+	void initialize_histograms(Histogram<lookback<u32>> * block_histograms, Histogram<u32> * p_grid_histogram) {
 		static_assert(ThreadsPerBlock == (*p_grid_histogram).size(), "invalid block dimension");
 		
 		usize constexpr WarpsPerBlock{ ThreadsPerBlock / 32 };
@@ -131,9 +135,11 @@ namespace spp {
 
 
 
-	template <usize ThreadsPerBlock, usize ItemsPerThread, template <typename> typename Histogram, typename Binning, typename MatchAny>
+	template <bool WithIndices, usize ThreadsPerBlock, usize ItemsPerThread,
+		template <typename> typename Histogram, typename Binning, typename MatchAny>
 	__global__
-	void radix_scan_by_key_with_large_block(u32 const * keys_in, u32 * keys_out, usize size,
+	void generic_radix_sort_scan_lane(u32 const * keys_in, u32 * keys_out, usize size,
+		u32 const * indices_in, u32 * indices_out,
 		Histogram<lookback<u32>> volatile * block_radix_histograms,
 		Histogram<u32> const * p_grid_radix_histogram,
 		Binning binning, MatchAny match_any) {
@@ -277,6 +283,10 @@ namespace spp {
 					+ usize(thread_exclusive_prefixes[i_key]);
 					
 				keys_out[out_rank] = thread_keys[i_key];
+
+				if constexpr (WithIndices) {
+					indices_out[out_rank] = indices_in[in_rank];
+				}
 			}
 		}
 
@@ -337,9 +347,10 @@ namespace spp {
 
 	namespace kernel {
 
-		inline
-		cudaError_t radix_sort(void * d_temp_storage, usize & d_temp_storage_bytes,
-			u32 const * keys_in, u32 * keys_out, usize size) {
+		template <bool WithIndices, typename InputIterator, typename OutputIterator>
+		cudaError_t generic_radix_sort(void * d_temp_storage, usize & d_temp_storage_bytes,
+			u32 const * keys_in, u32 * keys_out, usize size,
+			InputIterator values_in, OutputIterator values_out) {
 			
 			usize constexpr	radix_sort_items_per_thread		= 16;
 			usize constexpr	radix_sort_threads_per_block	= details::radix_lane_banks;
@@ -347,11 +358,13 @@ namespace spp {
 			
 			usize const		radix_sort_num_blocks			= ceiled_div(size, radix_sort_items_per_block);
 
-			usize const		d_grid_histogram_count			= 1_us;
-			usize const		d_block_histogram_count			= radix_sort_num_blocks;
-			usize const		d_keys_temp_count				= size;
-			memory_sections < details::radix_histogram<u32>, details::radix_histogram<lookback<u32>>, u32 > sections {
-				d_temp_storage, { d_grid_histogram_count, d_block_histogram_count, d_keys_temp_count }
+			usize const		d_grid_histogram_items			= 1_us;
+			usize const		d_block_histogram_items			= radix_sort_num_blocks;
+			usize const		d_keys_temp_items				= size;
+			usize const		d_indices_0_items				= WithIndices ? size : 0_us;
+			usize const		d_indices_1_items				= WithIndices ? size : 0_us;
+			memory_sections < details::radix_histogram<u32>, details::radix_histogram<lookback<u32>>, u32, u32, u32 > sections {
+				d_temp_storage, { d_grid_histogram_items, d_block_histogram_items, d_keys_temp_items, d_indices_0_items, d_indices_1_items }
 			};
 
 			if (d_temp_storage == nullptr) {
@@ -360,10 +373,17 @@ namespace spp {
 				return cudaSuccess;
 			}
 			else {
-				auto [p_grid_histogram, block_histograms, keys_temp] = sections.ptrs();
+				auto [p_grid_histogram, block_histograms, keys_temp, indices_0, indices_1] = sections.ptrs();
 
-				u32 const *	keys_in_pass[]	= { keys_in,	keys_temp,	keys_out,	keys_temp };
-				u32 *		keys_out_pass[]	= { keys_temp,	keys_out,	keys_temp,	keys_out };
+				u32 const *	keys_in_pass[]		= { keys_in,	keys_temp,	keys_out,	keys_temp };
+				u32 *		keys_out_pass[]		= { keys_temp,	keys_out,	keys_temp,	keys_out };
+				u32 const * indices_in_pass[]	= { indices_0,	indices_1,	indices_0,	indices_1 };
+				u32 *		indices_out_pass[]	= { indices_1,	indices_0,	indices_1,	indices_0 };
+
+				if constexpr (WithIndices) {
+					auto result = kernel::copy(indices_0, counting_iterator<u32>(0_u32), size);
+					if (cudaSuccess != result) return result;
+				}
 
 				for (usize i_pass = 0; i_pass < 4; ++i_pass) {
 
@@ -376,7 +396,7 @@ namespace spp {
 					}
 
 					/* initialize block histograms, and exclusively scan the grid histogram */ {
-						auto fn			= init_block_radix_histograms<details::radix_histogram<u32>::size(), details::radix_histogram>;
+						auto fn			= initialize_histograms<details::radix_histogram<u32>::size(), details::radix_histogram>;
 						auto grid_dim	= dim3(radix_sort_num_blocks);
 						auto block_dim	= dim3(details::radix_histogram<u32>::size());
 
@@ -387,24 +407,49 @@ namespace spp {
 					}
 
 					/* radix sort */ {
-						auto fn			= radix_scan_by_key_with_large_block<radix_sort_threads_per_block, radix_sort_items_per_thread, details::radix_histogram, details::radix_binning, details::match_any>;
+						auto fn			= generic_radix_sort_scan_lane<WithIndices, radix_sort_threads_per_block, radix_sort_items_per_thread, details::radix_histogram, details::radix_binning, details::match_any>;
 						auto grid_dim	= dim3(radix_sort_num_blocks);
 						auto block_dim	= dim3(radix_sort_threads_per_block);
 
 						auto result		= launch_kernel(fn, grid_dim, block_dim,
-							keys_in_pass[i_pass], keys_out_pass[i_pass], size, block_histograms, p_grid_histogram, binning, match_any
+							keys_in_pass[i_pass], keys_out_pass[i_pass], size,
+							indices_in_pass[i_pass], indices_out_pass[i_pass],
+							block_histograms, p_grid_histogram, binning, match_any
 						);
 						if (cudaSuccess != result) return result;
 					}
 
 				}
 
+				if constexpr (WithIndices) {
+					auto result = kernel::transform(indices_0, values_out, size,
+						[=] __device__ (u32 const index) {
+							return values_in[index];
+						}
+					);
+					if (cudaSuccess != result) return result;
+				}
+
 				return cudaSuccess;
 
 			}
+
+		} // generic_radix_sort
+
+
+
+		inline
+		cudaError_t radix_sort(void * d_temp_storage, usize & d_temp_storage_bytes,
+			u32 const * keys_in, u32 * keys_out, usize size) {
+
+			return generic_radix_sort<false>(
+				d_temp_storage, d_temp_storage_bytes,
+				keys_in, keys_out, size,
+				nullptr, nullptr
+			);
 		}
 
-	}
+	} // namespace kernel
 
 } // namespace spp
 
