@@ -1,5 +1,5 @@
-#ifndef SPP_REDUCE_HPP
-#define SPP_REDUCE_HPP
+#ifndef SPP_SCAN_HPP
+#define SPP_SCAN_HPP
 
 #include <type_traits>
 #include <cooperative_groups.h>
@@ -347,4 +347,4 @@ namespace spp {
 
 
 
-#endif // SPP_REDUCE_HPP
+#endif // SPP_SCAN_HPP

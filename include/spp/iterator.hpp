@@ -9,22 +9,23 @@ namespace spp {
 
 	template <typename T>
 	struct counting_iterator {
-		T value;
-		
+
 		using iterator_category = std::input_iterator_tag;
 		using value_type = T;
-		using difference_type = uint32_t;
+		using difference_type = int32_t;
 		using pointer = T const *;
 		using reference = T;
 
-		__host__ __device__
-		counting_iterator(T const & initial) : value(initial) {}
+		value_type value;
 
 		__host__ __device__
-		counting_iterator(T && initial) : value(initial) {}
+		counting_iterator(value_type const & initial) : value(initial) {}
 
 		__host__ __device__
-		T operator*() const {
+		counting_iterator(value_type && initial) : value(initial) {}
+
+		__host__ __device__
+		reference operator*() const {
 			return value;
 		}
 
@@ -42,14 +43,20 @@ namespace spp {
 
 	template <typename T>
 	__host__ __device__
-	counting_iterator<T> operator+(counting_iterator<T> const & it, uint32_t offset) {
+	counting_iterator<T> operator+(counting_iterator<T> const & it, typename counting_iterator<T>::difference_type offset) {
 		return counting_iterator{ it.value + offset };
 	}
 
 	template <typename T>
 	__host__ __device__
-	counting_iterator<T> operator+(uint32_t offset, counting_iterator<T> const & it) {
+	counting_iterator<T> operator+(typename counting_iterator<T>::difference_type offset, counting_iterator<T> const & it) {
 		return counting_iterator{ it.value + offset };
+	}
+
+	template <typename T>
+	__host__ __device__
+	typename counting_iterator<T>::difference_type operator-(counting_iterator<T> const & lhs, counting_iterator<T> const & rhs) {
+		return lhs.value - rhs.value;
 	}
 
 	template <typename T>
