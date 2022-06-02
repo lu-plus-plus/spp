@@ -407,7 +407,7 @@ namespace spp {
 				if constexpr (WithIndices) {
 					auto result = kernel::transform(indices_0, values_out, size,
 						[=] __device__ (u32 const index) {
-							return values_in[index];
+							return *(values_in + index);
 						}
 					);
 					if (cudaSuccess != result) return result;

@@ -56,18 +56,18 @@ namespace spp {
 	};
 
 	template <typename Fn, typename ... Args>
-	cudaError_t launch_kernel(Fn && fn_in, dim3 grid_dim, dim3 block_dim, Args && ... args_in) {
+	cudaError_t launch_kernel(Fn && fn_in, dim3 grid_dim, dim3 block_dim, Args ... args_in) {
 		auto fn{ reinterpret_cast<void const *>(std::forward<Fn>(fn_in)) };
-		addresses_of args{ std::forward<Args>(args_in)... };
+		addresses_of args{ args_in ... };
 
 		return cudaLaunchKernel(fn, grid_dim, block_dim, args.get());
 	}
 
 	template <typename Fn, typename ... Args>
-	cudaError_t launch_cooperative_kernel(Fn && fn_in, dim3 block_dim, Args && ... args_in) {
+	cudaError_t launch_cooperative_kernel(Fn && fn_in, dim3 block_dim, Args ... args_in) {
 		auto fn{ reinterpret_cast<void const *>(std::forward<Fn>(fn_in)) };
 		dim3 const grid_dim{ max_active_blocks_for(fn, block_dim.x * block_dim.y * block_dim.z) };
-		addresses_of args{ std::forward<Args>(args_in)... };
+		addresses_of args{ args_in ... };
 
 		return cudaLaunchCooperativeKernel(fn, grid_dim, block_dim, args.get());
 	}
