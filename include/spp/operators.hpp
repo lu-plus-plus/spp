@@ -40,6 +40,11 @@ namespace spp::op {
 		T operator()(T const & value) const {
 			return value;
 		}
+
+		__host__ __device__
+		T operator()(T const & value, uint32_t index) const {
+			return value;
+		}
 	};
 
 	template <>
@@ -49,6 +54,12 @@ namespace spp::op {
 		T operator()(T const & value) const {
 			return value;
 		}
+
+		template <typename T>
+		__host__ __device__
+		T operator()(T const & value, uint32_t index) const {
+			return value;
+		}		
 	};
 
 

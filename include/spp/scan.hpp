@@ -9,6 +9,7 @@
 #include "operators.hpp"
 #include "barrier.hpp"
 #include "lookback.hpp"
+#include "traits.hpp"
 
 
 
@@ -21,10 +22,10 @@ namespace spp {
 	namespace device {
 
 		template <u32 WarpsPerBlock, u32 ProducerBarrierId, u32 ConsumerBarrierId,
-			typename ComputeType, typename BinaryOp, typename IdentityOp>
+			typename ComputeType, typename Binary, typename Identity>
 		__device__
 		ComputeType scan_warp_exclusive_prefix(cg::thread_block_tile<32> const & warp,
-			ComputeType const & value, BinaryOp && binary_op, IdentityOp && identity_op) {
+			ComputeType const & value, Binary && binary, Identity && identity) {
 
 			__shared__ ComputeType warp_partial_results[WarpsPerBlock];
 
@@ -38,7 +39,7 @@ namespace spp {
 			if (warp.meta_group_rank() == 0) {
 				producer_barrier.arrive();
 
-				return std::forward<IdentityOp>(identity_op)();
+				return std::forward<Identity>(identity)();
 			}
 			else if (warp.meta_group_rank() + 1 != WarpsPerBlock) {
 				producer_barrier.arrive();
@@ -53,7 +54,7 @@ namespace spp {
 				if (warp.thread_rank() < WarpsPerBlock) {
 					cg::coalesced_group active = cg::coalesced_threads();
 					ComputeType const warp_partial_result = warp_partial_results[warp.thread_rank()];
-					warp_partial_results[warp.thread_rank()] = cg::exclusive_scan(active, warp_partial_result, std::forward<BinaryOp>(binary_op));
+					warp_partial_results[warp.thread_rank()] = cg::exclusive_scan(active, warp_partial_result, std::forward<Binary>(binary));
 				}
 
 				consumer_barrier.arrive();
@@ -66,12 +67,12 @@ namespace spp {
 
 
 		template <u32 WarpsPerBlock, u32 BarrierId,
-			typename ComputeType, typename BinaryOp, typename IdentityOp>
+			typename ComputeType, typename Binary, typename Identity>
 		__device__
 		ComputeType scan_block_exclusive_prefix(cg::grid_group const & grid, cg::thread_block_tile<32> const & warp,
 			lookback<ComputeType> volatile * block_lookbacks,
 			ComputeType const & warp_exclusive_prefix, ComputeType const & warp_reduction,
-			BinaryOp && binary_op, IdentityOp && identity_op) {
+			Binary && binary, Identity && identity) {
 
 			ComputeType block_exclusive_prefix;
 			__shared__ ComputeType shared_block_exclusive_prefix;
@@ -80,13 +81,13 @@ namespace spp {
 
 			if (warp.meta_group_rank() == 0) {				
 				if (warp.thread_rank() == 0) {
-					block_exclusive_prefix = std::forward<IdentityOp>(identity_op)();
+					block_exclusive_prefix = std::forward<Identity>(identity)();
 
 					for (isize i_block = isize(grid.block_rank()) - 1_is; 0_is <= i_block; --i_block) {
 						bool is_prefixed;
 						ComputeType const value{ block_lookbacks[i_block].spin_and_load(is_prefixed) };
 
-						block_exclusive_prefix = std::forward<BinaryOp>(binary_op)(block_exclusive_prefix, value);
+						block_exclusive_prefix = std::forward<Binary>(binary)(block_exclusive_prefix, value);
 
 						if (is_prefixed) break;
 					}
@@ -125,16 +126,16 @@ namespace spp {
 
 
 
-		template <typename ValueTy, typename BinaryOp>
+		template <typename T, typename Binary>
 		__device__
-		std::decay_t<ValueTy> warp_inclusive_scan(cg::thread_block_tile<32> const & warp, ValueTy && value, BinaryOp && binary_op) {
-			return cg::inclusive_scan(warp, std::forward<ValueTy>(value), std::forward<BinaryOp>(binary_op));
+		std::decay_t<T> warp_inclusive_scan(cg::thread_block_tile<32> const & warp, T && value, Binary && binary) {
+			return cg::inclusive_scan(warp, std::forward<T>(value), std::forward<Binary>(binary));
 		}
 
-		template <typename ValueTy, typename BinaryOp>
+		template <typename T, typename Binary>
 		__device__
-		std::decay_t<ValueTy> warp_exclusive_scan(cg::thread_block_tile<32> const & warp, ValueTy && value, BinaryOp && binary_op) {
-			return cg::exclusive_scan(warp, std::forward<ValueTy>(value), std::forward<BinaryOp>(binary_op));
+		std::decay_t<T> warp_exclusive_scan(cg::thread_block_tile<32> const & warp, T && value, Binary && binary) {
+			return cg::exclusive_scan(warp, std::forward<T>(value), std::forward<Binary>(binary));
 		}
 
 	} // namespace device
@@ -146,24 +147,24 @@ namespace spp {
 		template <
 			typename InputIterator, typename OutputIterator,
 			typename Prologue, typename Epilogue,
-			typename BinaryOp, typename IdentityOp,
+			typename Binary, typename Identity,
 			usize ThreadsPerBlock, usize ItemsPerThread, bool IsInclusive
 		>
 		__global__
 		void generic_lookback_scan(
 			InputIterator data_in, OutputIterator data_out, usize size,
 			Prologue prologue, Epilogue epilogue,
-			BinaryOp binary_op, IdentityOp identity_op,
-			lookback<decltype(prologue(*data_in))> volatile * block_lookbacks
+			Binary binary, Identity identity,
+			lookback<std::decay_t< apply_t<Prologue, dereference_t<InputIterator>, usize> >> volatile * block_lookbacks
 		) {
 
-			using InputType = std::decay_t<decltype(*data_in)>;
-			using OutputType = std::decay_t<decltype(*data_out)>;
-			using ComputeType = std::decay_t<decltype(prologue(*data_in))>;
+			using InputType		= std::decay_t< dereference_t<InputIterator> >;
+			using OutputType	= std::decay_t< dereference_t<OutputIterator> >;
+			using ComputeType	= std::decay_t< apply_t<Prologue, dereference_t<InputIterator>, usize> >;
 
-			auto const grid						= cg::this_grid();
-			auto const block					= cg::this_thread_block();
-			auto const warp						= cg::tiled_partition<32>(block);
+			auto const grid		= cg::this_grid();
+			auto const block	= cg::this_thread_block();
+			auto const warp		= cg::tiled_partition<32>(block);
 
 			usize constexpr WarpsPerBlock		= ThreadsPerBlock / 32;
 
@@ -176,25 +177,25 @@ namespace spp {
 
 
 			ComputeType item_prefixes[ItemsPerThread];
-			ComputeType warp_reduction = identity_op();
+			ComputeType warp_reduction = identity();
 
 			for (usize i_tile = 0; i_tile < ItemsPerThread; ++i_tile) {
 				usize const item_rank = block_rank_begin + warp_rank_begin + 32 * i_tile + warp.thread_rank();
 
-				ComputeType item = identity_op();
+				ComputeType item = identity();
 				if (item_rank < size) {
 					InputType input;
-					bytes_of<InputType>::copy(&input, &data_in[item_rank]);
-					item = prologue(input);
+					bytes_of<InputType>::copy(&input, &(*(data_in + item_rank)));
+					item = prologue(input, item_rank);
 				}
 
 				if constexpr (IsInclusive) {
-					ComputeType const tile_prefix = device::warp_inclusive_scan(warp, item, binary_op);
+					ComputeType const tile_prefix = device::warp_inclusive_scan(warp, item, binary);
 					item_prefixes[i_tile] = warp_reduction + tile_prefix;					
 					warp_reduction += warp.shfl(tile_prefix, 32 - 1);
 				}
 				else {
-					ComputeType const tile_prefix = device::warp_exclusive_scan(warp, item, binary_op);
+					ComputeType const tile_prefix = device::warp_exclusive_scan(warp, item, binary);
 					item_prefixes[i_tile] = warp_reduction + tile_prefix;
 					warp_reduction += warp.shfl(tile_prefix + item, 32 - 1);
 				}
@@ -206,20 +207,20 @@ namespace spp {
 			u32 constexpr WarpPrefixConsumed	= 2;
 			u32 constexpr BlockPrefixProduced	= 3;
 			
-			ComputeType const warp_exclusive_prefix = device::scan_warp_exclusive_prefix<WarpsPerBlock, WarpPrefixProduced, WarpPrefixConsumed>(warp, warp_reduction, binary_op, identity_op);
+			ComputeType const warp_exclusive_prefix = device::scan_warp_exclusive_prefix<WarpsPerBlock, WarpPrefixProduced, WarpPrefixConsumed>(warp, warp_reduction, binary, identity);
 
-			ComputeType const block_exclusive_prefix = device::scan_block_exclusive_prefix<WarpsPerBlock, BlockPrefixProduced>(grid, warp, block_lookbacks, warp_exclusive_prefix, warp_reduction, binary_op, identity_op);
+			ComputeType const block_exclusive_prefix = device::scan_block_exclusive_prefix<WarpsPerBlock, BlockPrefixProduced>(grid, warp, block_lookbacks, warp_exclusive_prefix, warp_reduction, binary, identity);
 
 
 
-			ComputeType const block_warp_exclusive_prefix = binary_op(block_exclusive_prefix, warp_exclusive_prefix);
+			ComputeType const block_warp_exclusive_prefix = binary(block_exclusive_prefix, warp_exclusive_prefix);
 
 			for (usize i_tile = 0; i_tile < ItemsPerThread; ++i_tile) {
 				u32 const item_rank = block_rank_begin + warp_rank_begin + 32 * i_tile + warp.thread_rank();
 				
 				if (item_rank < size) {
-					OutputType item = epilogue(binary_op(block_warp_exclusive_prefix, item_prefixes[i_tile]));
-					bytes_of<OutputType>::copy(&data_out[item_rank], &item);
+					OutputType item = epilogue(binary(block_warp_exclusive_prefix, item_prefixes[i_tile]), item_rank);
+					bytes_of<OutputType>::copy(&(*(data_out + item_rank)), &item);
 				}
 			}
 
@@ -246,20 +247,16 @@ namespace spp {
 
 		template <bool IsInclusive,
 			typename InputIterator, typename OutputIterator,
-			typename PrologueType = op::identity_function<>,
-			typename EpilogueType = op::identity_function<>,
-			typename BinaryOp = op::plus<>,
-			typename IdentityOp = op::identity_element<decltype(std::declval<PrologueType>()(*std::declval<InputIterator>()))>>
+			typename Prologue, typename Epilogue,
+			typename Binary, typename Identity>
 		cudaError_t generic_scan(void * temp_storage, usize & temp_storage_bytes,
 			InputIterator data_in, OutputIterator data_out, usize size,
-			PrologueType prologue = PrologueType(),
-			EpilogueType epilogue = EpilogueType(),
-			BinaryOp binary_op = BinaryOp(),
-			IdentityOp identity_op = IdentityOp()) {
+			Prologue prologue, Epilogue epilogue,
+			Binary binary, Identity identity) {
 
-			using InputType = std::decay_t<decltype(*data_in)>;
-			using OutputType = std::decay_t<decltype(*data_out)>;
-			using ComputeType = std::decay_t<decltype(prologue(*data_in))>;
+			using InputType		= std::decay_t< dereference_t<InputIterator> >;
+			using OutputType	= std::decay_t< dereference_t<OutputIterator> >;
+			using ComputeType	= std::decay_t< apply_t<Prologue, dereference_t<InputIterator>, usize> >;
 
 			usize constexpr ThreadsPerBlock = 128;
 			usize constexpr ItemsPerThread = 16;
@@ -286,14 +283,14 @@ namespace spp {
 				/* scan */ {
 					auto fn				= reinterpret_cast<void const *>(global::generic_lookback_scan<
 						InputIterator, OutputIterator,
-						PrologueType, EpilogueType,
-						BinaryOp, IdentityOp,
+						Prologue, Epilogue,
+						Binary, Identity,
 						ThreadsPerBlock, ItemsPerThread, IsInclusive
 					>);
 					auto grid_dim		= dim3(scan_num_blocks, 1, 1);
 					auto block_dim		= dim3(ThreadsPerBlock, 1, 1);
 
-					void * args[] = { &data_in, &data_out, &size, &prologue, &epilogue, &binary_op, &identity_op, &temp_storage };
+					void * args[] = { &data_in, &data_out, &size, &prologue, &epilogue, &binary, &identity, &temp_storage };
 
 					return cudaLaunchKernel(fn, grid_dim, block_dim, args);
 				}
@@ -302,42 +299,42 @@ namespace spp {
 		} // generic_scan
 
 		template <typename InputIterator, typename OutputIterator,
-			typename PrologueType = op::identity_function<>,
-			typename EpilogueType = op::identity_function<>,
-			typename BinaryOp = op::plus<>,
-			typename IdentityOp = op::identity_element<decltype(std::declval<PrologueType>()(*std::declval<InputIterator>()))>>
+			typename Prologue = op::identity_function<>,
+			typename Epilogue = op::identity_function<>,
+			typename Binary = op::plus<>,
+			typename Identity = op::identity_element<std::decay_t< apply_t<Prologue, dereference_t<InputIterator>, usize> >> >
 		cudaError_t inclusive_scan(void * temp_storage, usize & temp_storage_bytes,
 			InputIterator data_in, OutputIterator data_out, usize size,
-			PrologueType prologue = PrologueType(),
-			EpilogueType epilogue = EpilogueType(),
-			BinaryOp binary_op = BinaryOp(),
-			IdentityOp identity_op = IdentityOp()) {
+			Prologue prologue = Prologue(),
+			Epilogue epilogue = Epilogue(),
+			Binary binary = Binary(),
+			Identity identity = Identity()) {
 			
 			return generic_scan<true>(
 				temp_storage, temp_storage_bytes,
 				data_in, data_out, size,
 				prologue, epilogue,
-				binary_op, identity_op
+				binary, identity
 			);
 		}
 
 		template <typename InputIterator, typename OutputIterator,
-			typename PrologueType = op::identity_function<>,
-			typename EpilogueType = op::identity_function<>,
-			typename BinaryOp = op::plus<>,
-			typename IdentityOp = op::identity_element<decltype(std::declval<PrologueType>()(*std::declval<InputIterator>()))>>
+			typename Prologue = op::identity_function<>,
+			typename Epilogue = op::identity_function<>,
+			typename Binary = op::plus<>,
+			typename Identity = op::identity_element<std::decay_t< apply_t<Prologue, dereference_t<InputIterator>, usize> >> >
 		cudaError_t exclusive_scan(void * temp_storage, usize & temp_storage_bytes,
 			InputIterator data_in, OutputIterator data_out, usize size,
-			PrologueType prologue = PrologueType(),
-			EpilogueType epilogue = EpilogueType(),
-			BinaryOp binary_op = BinaryOp(),
-			IdentityOp identity_op = IdentityOp()) {
+			Prologue prologue = Prologue(),
+			Epilogue epilogue = Epilogue(),
+			Binary binary = Binary(),
+			Identity identity = Identity()) {
 			
 			return generic_scan<false>(
 				temp_storage, temp_storage_bytes,
 				data_in, data_out, size,
 				prologue, epilogue,
-				binary_op, identity_op
+				binary, identity
 			);
 		}
 
