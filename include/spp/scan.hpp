@@ -159,8 +159,9 @@ namespace spp {
 		) {
 
 			using InputType		= std::decay_t< dereference_t<InputIterator> >;
+			using ComputeType	= std::decay_t< apply_t<Prologue, InputType, usize> >;
+			using ResultType	= std::decay_t< apply_t<Epilogue, ComputeType, usize> >;
 			using OutputType	= std::decay_t< dereference_t<OutputIterator> >;
-			using ComputeType	= std::decay_t< apply_t<Prologue, dereference_t<InputIterator>, usize> >;
 
 			auto const grid		= cg::this_grid();
 			auto const block	= cg::this_thread_block();
@@ -219,8 +220,13 @@ namespace spp {
 				u32 const item_rank = block_rank_begin + warp_rank_begin + 32 * i_tile + warp.thread_rank();
 				
 				if (item_rank < size) {
-					OutputType item = epilogue(binary(block_warp_exclusive_prefix, item_prefixes[i_tile]), item_rank);
-					bytes_of<OutputType>::copy(&(*(data_out + item_rank)), &item);
+					if constexpr (std::is_same_v<ResultType, void>) {
+						epilogue(binary(block_warp_exclusive_prefix, item_prefixes[i_tile]), item_rank);
+					}
+					else {
+						OutputType item{ epilogue(binary(block_warp_exclusive_prefix, item_prefixes[i_tile]), item_rank) };
+						bytes_of<OutputType>::copy(&(*(data_out + item_rank)), &item);
+					}
 				}
 			}
 
@@ -254,8 +260,6 @@ namespace spp {
 			Prologue prologue, Epilogue epilogue,
 			Binary binary, Identity identity) {
 
-			using InputType		= std::decay_t< dereference_t<InputIterator> >;
-			using OutputType	= std::decay_t< dereference_t<OutputIterator> >;
 			using ComputeType	= std::decay_t< apply_t<Prologue, dereference_t<InputIterator>, usize> >;
 
 			usize constexpr ThreadsPerBlock = 128;
