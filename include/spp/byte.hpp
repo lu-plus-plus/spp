@@ -232,6 +232,9 @@ namespace spp {
 
 
 
+		// <todo>
+		// Is it valid to use *ldcg*?
+		// </todo>
 		template <template <typename> typename StoreOp = op::assignment, template <typename> typename LoadOp = op::ldcg>
 		__host__ __device__
 		static
@@ -245,6 +248,9 @@ namespace spp {
 
 
 
+		// <todo>
+		// Is it valid to use *stcg*?
+		// </todo>
 		template <template <typename> typename StoreOp = op::stcg, template <typename> typename LoadOp = op::dereference>
 		__host__ __device__
 		static

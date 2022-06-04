@@ -184,9 +184,15 @@ namespace spp {
 
 				ComputeType item = identity();
 				if (item_rank < size) {
-					InputType input;
-					bytes_of<InputType>::copy(&input, &(*(data_in + item_rank)));
-					item = prologue(input, item_rank);
+					// InputType input;
+					// bytes_of<InputType>::copy(&input, &(*(data_in + item_rank)));
+					// item = prologue(input, item_rank);
+					// <todo>
+					// It is not safe to vectorize access possibly unaligned data,
+					// so compile-time alignment check is needed.
+					// See below for copy in storing.
+					// </todo>
+					item = prologue(*(data_in + item_rank), item_rank);
 				}
 
 				if constexpr (IsInclusive) {
@@ -225,7 +231,11 @@ namespace spp {
 					else {
 						using OutputType = std::decay_t< dereference_t<OutputIterator> >;
 						OutputType item{ epilogue(binary(block_warp_exclusive_prefix, item_prefixes[i_tile]), item_rank) };
-						bytes_of<OutputType>::copy(&(*(data_out + item_rank)), &item);
+						// <todo>
+						// See above comments.
+						// </todo>
+						// bytes_of<OutputType>::copy(&(*(data_out + item_rank)), &item);
+						*(data_out + item_rank) = item;
 					}
 				}
 			}

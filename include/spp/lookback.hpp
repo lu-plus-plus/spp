@@ -49,27 +49,44 @@ namespace spp {
 
 		__device__
 		lookback volatile & store_invalid() volatile {
-			m_status = e_status::invalid;
-			m_aggregate = T{};
-			m_prefix = T{};
+			// m_status = e_status::invalid;
+			// m_aggregate = T{};
+			// m_prefix = T{};
+
+			e_status const status{ e_status::invalid };
+			T const value{};
+
+			bytes_of<e_status>::copy(&m_status, &status);
+			bytes_of<T>::copy(&m_aggregate, &value);
+			bytes_of<T>::copy(&m_prefix, &value);
 
 			return *this;
 		}
 
 		__device__
 		lookback volatile & store_aggregate(T const & value) volatile {
-			m_aggregate = value;
+			// m_aggregate = value;
+			// __threadfence();
+			// m_status = e_status::aggregated;
+
+			bytes_of<T>::copy(&m_aggregate, &value);
 			__threadfence();
-			m_status = e_status::aggregated;
-			
+			e_status const status{ e_status::aggregated };
+			bytes_of<e_status>::copy(&m_status, &status);
+
 			return *this;
 		}
 
 		__device__
 		lookback volatile & store_prefix(T const & value) volatile {
-			m_prefix = value;
+			// m_prefix = value;
+			// __threadfence();
+			// m_status = e_status::prefixed;
+
+			bytes_of<T>::copy(&m_prefix, &value);
 			__threadfence();
-			m_status = e_status::prefixed;
+			e_status const status{ e_status::prefixed };
+			bytes_of<e_status>::copy(&m_status, &status);
 
 			return *this;
 		}
@@ -81,7 +98,12 @@ namespace spp {
 			e_status status;
 			do status = m_status; while (status == e_status::invalid);
 			is_prefixed = status == e_status::prefixed;
-			return is_prefixed ? m_prefix : m_aggregate;
+
+			// return is_prefixed ? m_prefix : m_aggregate;
+
+			T result;
+			bytes_of<T>::copy(&result, &(is_prefixed ? m_prefix : m_aggregate));
+			return result;
 		}
 
 	};
