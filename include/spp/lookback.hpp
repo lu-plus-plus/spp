@@ -33,7 +33,6 @@ namespace spp {
 
 		/* constructors and assignment operators */
 
-		constexpr
 		lookback() = default;
 
 		constexpr
@@ -119,7 +118,6 @@ namespace spp {
 
 		/* constructors and assignment operators */
 
-		constexpr
 		lookback() = default;
 
 		constexpr

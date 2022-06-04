@@ -161,7 +161,6 @@ namespace spp {
 			using InputType		= std::decay_t< dereference_t<InputIterator> >;
 			using ComputeType	= std::decay_t< apply_t<Prologue, InputType, usize> >;
 			using ResultType	= std::decay_t< apply_t<Epilogue, ComputeType, usize> >;
-			using OutputType	= std::decay_t< dereference_t<OutputIterator> >;
 
 			auto const grid		= cg::this_grid();
 			auto const block	= cg::this_thread_block();
@@ -224,6 +223,7 @@ namespace spp {
 						epilogue(binary(block_warp_exclusive_prefix, item_prefixes[i_tile]), item_rank);
 					}
 					else {
+						using OutputType = std::decay_t< dereference_t<OutputIterator> >;
 						OutputType item{ epilogue(binary(block_warp_exclusive_prefix, item_prefixes[i_tile]), item_rank) };
 						bytes_of<OutputType>::copy(&(*(data_out + item_rank)), &item);
 					}
