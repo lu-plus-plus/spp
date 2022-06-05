@@ -44,6 +44,16 @@ namespace spp {
 			cudaCheck(cudaMemcpy(m_data, host_vector.data(), sizeof(T) * m_size, cudaMemcpyHostToDevice));
 		}
 
+		void destroy() const {
+			cudaCheck(cudaFree(m_data));
+		}
+
+		void clear() {
+			m_data = nullptr;
+			m_size = 0;
+			m_capacity = 0;
+		}
+
 	public:
 
 		device_vector() : m_data(alloc_items(default_capacity)), m_size(0), m_capacity(default_capacity) {}
@@ -83,8 +93,28 @@ namespace spp {
 			cudaCheck(cudaMemcpy(m_data, host_vector.data(), sizeof(T) * m_size, cudaMemcpyHostToDevice));
 		}
 
+		device_vector(device_vector const &) = delete;
+		
+		device_vector & operator=(device_vector const &) = delete;
+		
+		device_vector(device_vector && rhs) : m_data(rhs.m_data), m_size(rhs.m_size), m_capacity(rhs.m_capacity) {
+			rhs.clear();
+		};
+		
+		device_vector & operator=(device_vector && rhs) {
+			destroy();
+
+			m_data = rhs.m_data;
+			m_size = rhs.m_size;
+			m_capacity = rhs.m_capacity;
+
+			rhs.clear();
+
+			return *this;
+		}
+
 		~device_vector() {
-			cudaCheck(cudaFree(m_data));
+			destroy();
 		}
 
 		T * data() const {
