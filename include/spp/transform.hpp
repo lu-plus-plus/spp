@@ -22,13 +22,14 @@ namespace spp {
 		__global__
 		void transform(InputIterator data_in, OutputIterator data_out, uint32_t size, UnaryOp unary_op) {
 			
-			using InputType = std::decay_t<spp::dereference_t<InputIterator>>;
+			using ComputeType = std::decay_t<spp::dereference_t<InputIterator>>;
+			using ResultType = std::decay_t<spp::apply_t<UnaryOp, ComputeType>>;
 
 			auto const grid{ cg::this_grid() };
 			auto const item_rank_begin{ uint32_t(grid.thread_rank()) };
 			auto const item_rank_step{ uint32_t(grid.num_threads()) };
 
-			InputType items[ItemsPerThread];
+			ComputeType items[ItemsPerThread];
 
 			for (uint32_t i_item = 0; i_item < ItemsPerThread; ++i_item) {
 				uint32_t const item_rank = item_rank_begin + item_rank_step * i_item;
@@ -40,7 +41,12 @@ namespace spp {
 			for (uint32_t i_item = 0; i_item < ItemsPerThread; ++i_item) {
 				uint32_t const item_rank = item_rank_begin + item_rank_step * i_item;
 				if (item_rank < size) {
-					*(data_out + item_rank) = unary_op(items[i_item]);
+					if constexpr (std::is_same_v<ResultType, void>) {
+						unary_op(items[i_item]);
+					}
+					else {
+						*(data_out + item_rank) = unary_op(items[i_item]);
+					}
 				}
 			}
 
