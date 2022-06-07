@@ -82,7 +82,11 @@ namespace spp {
 		device_vector(size_t size) :
 			m_data(alloc_items(inclusive_next_power_of_2(size))),
 			m_size(size),
-			m_capacity(inclusive_next_power_of_2(size)) {}
+			m_capacity(inclusive_next_power_of_2(size)) {
+
+			std::vector<T> host_vector(m_size);
+			cudaCheck(cudaMemcpy(m_data, host_vector.data(), sizeof(T) * m_size, cudaMemcpyHostToDevice));
+		}
 
 		device_vector(size_t size, T const & init) :
 			m_data(alloc_items(inclusive_next_power_of_2(size))),
