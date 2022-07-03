@@ -13,6 +13,9 @@ namespace spp {
 	template <typename Fn, typename ... Args>
 	using apply_t = decltype(std::declval<Fn>()(std::declval<Args>()...));
 
+	template <typename T, typename I>
+	using subscript_t = decltype(std::declval<T>()[std::declval<I>()]);
+
 
 
 	// struct pointed_cast {

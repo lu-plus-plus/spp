@@ -42,6 +42,10 @@ namespace spp {
 		return uint32_t(numBlocksPerSm * deviceProp.multiProcessorCount);
 	}
 
+	template <typename T>
+	inline constexpr
+	uint32_t recommended_thread_tile_v{ 128u / sizeof(T) > 0u ? 128u / sizeof(T) : 1u };
+
 	template <typename ... Args>
 	struct addresses_of {
 

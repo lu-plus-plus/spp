@@ -8,6 +8,7 @@ namespace spp::op {
 	template <typename T>
 	struct identity_element {
 		__host__ __device__
+		constexpr
 		T operator()() const {
 			return T{ 0 };
 		}
@@ -18,11 +19,13 @@ namespace spp::op {
 	template <typename T = void>
 	struct identity_function {
 		__host__ __device__
+		constexpr
 		T operator()(T const & value) const {
 			return value;
 		}
 
 		__host__ __device__
+		constexpr
 		T operator()(T const & value, uint32_t index) const {
 			return value;
 		}
@@ -32,12 +35,14 @@ namespace spp::op {
 	struct identity_function<void> {
 		template <typename T>
 		__host__ __device__
+		constexpr
 		T operator()(T const & value) const {
 			return value;
 		}
 
 		template <typename T>
 		__host__ __device__
+		constexpr
 		T operator()(T const & value, uint32_t index) const {
 			return value;
 		}		
@@ -48,6 +53,7 @@ namespace spp::op {
 	template <typename T = void>
 	struct plus {
 		__host__ __device__
+		constexpr
 		T operator()(T const & a, T const & b) const {
 			return a + b;
 		}
@@ -57,8 +63,30 @@ namespace spp::op {
 	struct plus<void> {
 		template <typename T>
 		__host__ __device__
+		constexpr
 		T operator()(T const & a, T const & b) const {
 			return a + b;
+		}
+	};
+
+
+
+	template <typename T = void>
+	struct min {
+		__host__ __device__
+		constexpr
+		T operator()(T const & a, T const & b) const {
+			return a < b ? a : b;
+		}
+	};
+
+	template <>
+	struct min<void> {
+		template <typename T>
+		__host__ __device__
+		constexpr
+		T operator()(T const & a, T const & b) const {
+			return a < b ? a : b;
 		}
 	};
 
