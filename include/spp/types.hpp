@@ -5,10 +5,6 @@
 
 
 
-#define with_(...) if (__VA_ARGS__; true)
-
-
-
 namespace spp {
 
 	using i8	= int8_t;
@@ -29,7 +25,12 @@ namespace spp {
 
 
 
-	#define user_defined_literal(ret_type, suffix, literal_type) inline constexpr __host__ __device__ ret_type operator "" _ ## suffix(literal_type literal) { return static_cast<ret_type>(literal); }
+	#define user_defined_literal(ret_type, suffix, literal_type)	\
+		inline constexpr											\
+		__host__ __device__											\
+		ret_type operator "" _ ## suffix(literal_type literal) {	\
+			return static_cast<ret_type>(literal);					\
+		}
 
 	user_defined_literal(i8,	i8,		unsigned long long int)
 	user_defined_literal(i16,	i16,	unsigned long long int)

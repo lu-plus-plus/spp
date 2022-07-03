@@ -1,7 +1,7 @@
 #ifndef SPP_BARRIER_HPP
 #define SPP_BARRIER_HPP
 
-#include "types.hpp"
+#include <cstdint>
 
 
 
@@ -10,7 +10,7 @@ namespace spp {
 	#define ptx_barrier_arrive(id, count) asm volatile ("barrier.arrive %0, %1;" : : "n"(id), "n"(count))
 	#define ptx_barrier_sync(id, count) asm volatile ("barrier.sync %0, %1;" : : "n"(id), "n"(count))
 
-	template <u32 Id, u32 WarpCount>
+	template <uint32_t Id, uint32_t WarpCount>
 	struct barrier {
 		__device__
 		void wait() const noexcept {

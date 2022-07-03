@@ -8,7 +8,7 @@
 #include <cooperative_groups/reduce.h>
 
 #include "traits.hpp"
-#include "operators.hpp"
+#include "operators/math.hpp"
 #include "pipelined_for.hpp"
 #include "kernel_launch.hpp"
 

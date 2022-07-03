@@ -1,68 +1,11 @@
-#ifndef SPP_OPERATORS_HPP
-#define SPP_OPERATORS_HPP
+#ifndef SPP_OPERATORS_MEMORY_HPP
+#define SPP_OPERATORS_MEMORY_HPP
+
+#include <utility>
 
 
 
 namespace spp::op {
-
-	template <typename T>
-	struct identity_element {
-		__host__ __device__
-		T operator()() const {
-			return T{ 0 };
-		}
-	};
-
-
-
-	template <typename T = void>
-	struct plus {
-		__host__ __device__
-		T operator()(T const & a, T const & b) const {
-			return a + b;
-		}
-	};
-
-	template <>
-	struct plus<void> {
-		template <typename T>
-		__host__ __device__
-		T operator()(T const & a, T const & b) const {
-			return a + b;
-		}
-	};
-
-
-
-	template <typename T = void>
-	struct identity_function {
-		__host__ __device__
-		T operator()(T const & value) const {
-			return value;
-		}
-
-		__host__ __device__
-		T operator()(T const & value, uint32_t index) const {
-			return value;
-		}
-	};
-
-	template <>
-	struct identity_function<void> {
-		template <typename T>
-		__host__ __device__
-		T operator()(T const & value) const {
-			return value;
-		}
-
-		template <typename T>
-		__host__ __device__
-		T operator()(T const & value, uint32_t index) const {
-			return value;
-		}		
-	};
-
-
 
 	/* load functions */
 
@@ -118,7 +61,7 @@ namespace spp::op {
 
 		__host__ __device__
 		void operator()(T * ptr, T && value) const {
-			*ptr = value;
+			*ptr = std::move(value);
 		}
 
 		__host__ __device__
@@ -128,25 +71,29 @@ namespace spp::op {
 
 		__host__ __device__
 		void operator()(T volatile * ptr, T && value) const {
-			*ptr = value;
+			*ptr = std::move(value);
 		}
 	};
 
 	template <typename T>
 	struct stcg {
 		__device__
+		void operator()(T * ptr, T const & value) const {
+			__stcg(ptr, value);
+		}
+
+		__device__
 		void operator()(T volatile * ptr, T const & value) const {
 			__stcg(const_cast<T *>(ptr), value);
 		}
 
-		__device__
-		void operator()(T volatile * ptr, T && value) const {
-			__stcg(const_cast<T *>(ptr), value);
-		}
+		// <comment>
+		// no operator()(T *, T &&): __stcg has no overloading for rvalue
+		// </comment>
 	};
 
-} // namespace spp::op
+}
 
 
 
-#endif // SPP_OPERATORS_HPP
+#endif // SPP_OPERATORS_MEMORY_HPP

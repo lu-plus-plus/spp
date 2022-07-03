@@ -61,19 +61,19 @@ namespace spp::test {
 
 			float total_time = 0.0f;
 
-			with_(spp::event start, stop) {
-				for (SizeTy i = 0; i < repeat; ++i) {
-					start.record();
-					
-					run(std::forward<Fn>(fn), std::forward<Args>(args)...);
-					
-					stop.record();
-					stop.synchronize();
-					
-					float const time = stop.elapsed_time_from(start);
-					total_time += time;
-					std::cout << "[repeat " << std::setw(4) << i << "] time = " << time << " ms\n";
-				}
+			spp::event start, stop;
+
+			for (SizeTy i = 0; i < repeat; ++i) {
+				start.record();
+				
+				run(std::forward<Fn>(fn), std::forward<Args>(args)...);
+				
+				stop.record();
+				stop.synchronize();
+				
+				float const time = stop.elapsed_time_from(start);
+				total_time += time;
+				std::cout << "[repeat " << std::setw(4) << i << "] time = " << time << " ms\n";
 			}
 
 			std::cout << "[average] time = " << total_time / repeat << " ms\n\n";

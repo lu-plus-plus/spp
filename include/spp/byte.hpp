@@ -1,9 +1,8 @@
 #ifndef SPP_BYTE_HPP
 #define SPP_BYTE_HPP
 
-#include <cstdint>
-
-#include "operators.hpp"
+#include "traits.hpp"
+#include "operators/memory.hpp"
 
 
 
@@ -32,9 +31,6 @@ namespace spp {
 
 	};
 
-	// template <typename T>
-	// using bytes_of	= byte<sizeof(T)>;
-
 	using byte1		= byte<1>;
 	using byte2		= byte<2>;
 	using byte4		= byte<4>;
@@ -46,101 +42,45 @@ namespace spp {
 	template <typename T>
 	struct bytes_of {
 
-		static constexpr
-		int value_alignment{ alignof(T) };
-
-		static constexpr
-		int value_bytes{ sizeof(T) };
-
-		__host__ __device__
-		static constexpr
-		bool aligned_to(int alignment) { return value_alignment % alignment == 0; }
-
-
-
 	private:
 
-		template <typename Vector, template <typename> typename StoreOp, template <typename> typename LoadOp>
+		static constexpr
+		int align_in_bytes{ alignof(T) };
+
+		static constexpr
+		int size_in_bytes{ sizeof(T) };
+
+		__host__ __device__
+		static constexpr
+		bool aligned_to(int alignment) { return align_in_bytes % alignment == 0; }
+
+
+
+		template <typename Vector, template <typename> typename StoreOp, template <typename> typename LoadOp, typename DstPtr, typename SrcPtr>
 		__host__ __device__
 		static
-		void vectorized_copy(void * dst, void const * src) {
+		void vectorized_copy(DstPtr dst, SrcPtr src) {
 
-			int constexpr this_alignment{ alignof(Vector) };
-			int constexpr prev_alignment{ 2 * this_alignment };
+			int constexpr this_align{ alignof(Vector) };
+			int constexpr prev_align{ 2 * this_align };
 
-			if constexpr (aligned_to(this_alignment)) {
+			if constexpr (aligned_to(this_align)) {
 
-				int constexpr begin{ this_alignment == 16 ? 0 : (
-					aligned_to(prev_alignment) ? (value_bytes / prev_alignment * 2) : 0
+				int constexpr begin{ this_align == 16 ? 0 : (
+					aligned_to(prev_align) ? (size_in_bytes / prev_align * 2) : 0
 				) };
-				int constexpr end{ value_bytes / this_alignment };
+				int constexpr end{ size_in_bytes / this_align };
 
 				for (int i = begin; i < end; ++i) {
 					StoreOp<Vector>()(
-						static_cast<Vector *>(dst) + i,
-						LoadOp<Vector>()(static_cast<Vector const *>(src) + i)
+						pointed_cast<DstPtr, Vector>(dst) + i,
+						LoadOp<Vector>()(pointed_cast<SrcPtr, Vector>(src) + i)
 					);
 				}
 
-			} // ! if
+			}
 
-		} // ! vectorized_copy
-
-
-
-		template <typename Vector, template <typename> typename StoreOp, template <typename> typename LoadOp>
-		__host__ __device__
-		static
-		void vectorized_copy(void * dst, void const volatile * src) {
-
-			int constexpr this_alignment{ alignof(Vector) };
-			int constexpr prev_alignment{ 2 * this_alignment };
-
-			if constexpr (aligned_to(this_alignment)) {
-
-				int constexpr begin{ this_alignment == 16 ? 0 : (
-					aligned_to(prev_alignment) ? (value_bytes / prev_alignment * 2) : 0
-				) };
-				int constexpr end{ value_bytes / this_alignment };
-
-				for (int i = begin; i < end; ++i) {
-					StoreOp<Vector>()(
-						static_cast<Vector *>(dst) + i,
-						LoadOp<Vector>()(static_cast<Vector const volatile *>(src) + i)
-					);
-				}
-
-			} // ! if
-
-		} // ! vectorized_copy
-
-
-
-		template <typename Vector, template <typename> typename StoreOp, template <typename> typename LoadOp>
-		__host__ __device__
-		static
-		void vectorized_copy(void volatile * dst, void const * src) {
-
-			int constexpr this_alignment{ alignof(Vector) };
-			int constexpr prev_alignment{ 2 * this_alignment };
-
-			if constexpr (aligned_to(this_alignment)) {
-
-				int constexpr begin{ this_alignment == 16 ? 0 : (
-					aligned_to(prev_alignment) ? (value_bytes / prev_alignment * 2) : 0
-				) };
-				int constexpr end{ value_bytes / this_alignment };
-
-				for (int i = begin; i < end; ++i) {
-					StoreOp<Vector>()(
-						static_cast<Vector volatile *>(dst) + i,
-						LoadOp<Vector>()(static_cast<Vector const *>(src) + i)
-					);
-				}
-
-			} // ! if
-
-		} // ! vectorized_copy
+		}
 
 
 
