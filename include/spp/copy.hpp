@@ -35,16 +35,23 @@ namespace spp::global {
 
 }
 
+
+
 namespace spp::kernel {
 
 	template <typename OutputIterator, typename InputIterator>
 	cudaError_t copy(OutputIterator data_out, InputIterator data_in, uint32_t size) {
-		uint32_t const ThreadsPerBlock{ 256 };
-		uint32_t const ItemsPerThread{ 4 };
 
-		auto fn			= global::copy<ItemsPerThread, OutputIterator, InputIterator>;
-		auto grid_dim	= ceiled_div(size, ThreadsPerBlock);
-		auto block_dim	= ThreadsPerBlock;
+		using OutputType	= std::decay_t<dereference_t<OutputIterator>>;
+		using InputType		= std::decay_t<dereference_t<InputIterator>>;
+		static_assert(std::is_same_v<OutputType, InputType>, "Use spp::transform() instead, when input type and output type are different.");
+
+		constexpr uint32_t ThreadsPerBlock	{ 256 };	// <comment> Block size is large enough to make the maximum block number per SM a non-limiting factor. </comment>
+		constexpr uint32_t ItemsPerThread	{ 4 };		// <todo> Is it enough to squeeze out all the bandwidth? </todo>
+
+		auto fn			{ global::copy<ItemsPerThread, OutputIterator, InputIterator> };
+		dim3 grid_dim	{ ceiled_div(size, ThreadsPerBlock) };
+		dim3 block_dim	{ ThreadsPerBlock };
 		
 		return launch_kernel(fn, grid_dim, block_dim, data_out, data_in, size);
 	}
